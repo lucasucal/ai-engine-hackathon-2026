@@ -1,4 +1,4 @@
-//! The `/act` contract `v0`, schema version 2: see `CONTRACT.md`.
+//! The `/act` contract `v0`, schema version 2: see `API.md`.
 
 use crate::kinematics::Joints;
 use serde::{Deserialize, Serialize};

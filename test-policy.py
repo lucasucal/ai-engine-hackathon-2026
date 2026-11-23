@@ -1,4 +1,4 @@
-"""A stand-in policy server for the `/act` contract v0 (see CONTRACT.md), standard library only.
+"""A stand-in policy server for the `/act` contract v0 (see API.md), standard library only.
 
 It swings the chosen joints sinusoidally about the start pose, by default only the wrists by
 ±0.1 rad over 5 s, opening and closing the gripper every 5 s. With --offset it instead moves the palm

@@ -70,13 +70,10 @@ RUN echo 'eval "$(mise activate bash)"' >> ~/.bashrc && \
 # Silences uv's hardlink warning: its cache and the mounted workspace are on different filesystems.
 ENV UV_LINK_MODE=copy
 
-# The source workspaces below keep only `install`: colcon copies into it rather than symlinking,
-# so the sources aren't needed at run time, and removing them in the same RUN keeps them out of
-# the image.
+# colcon copies into `install`, so each workspace deletes its sources in the RUN that builds it.
 
-# The Kilted release of ros2_robotiq_gripper has neither the 2F-140's description
-# nor the driver. Its tests need linters the image doesn't have.
-# `git clone --depth 1` can't check out a SHA, so each repo fetches its pinned commit alone.
+# Kilted's ros2_robotiq_gripper release lacks the 2F-140's description and the driver, and its
+# tests need linters the image doesn't have. `git clone --depth 1` can't check out a SHA.
 RUN clone_commit() { \
         git init --quiet "$3" && \
         git -C "$3" fetch --quiet --depth 1 "$1" "$2" && \

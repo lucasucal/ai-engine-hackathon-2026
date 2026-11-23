@@ -10,10 +10,10 @@
   <arg name="headless_mode" default="true"
        description="Send the driver's program on connect, which needs the robot in Remote Control mode; false to play External Control on the pendant in Local mode"/>
   <!-- Here, as below the includes $(dirname) would be the last included file's. -->
-  <let name="ur_overrides" value="$(dirname)/../config/ur_overrides.yaml"/>
-  <let name="gripper_controllers" value="$(dirname)/../config/gripper_controllers.yaml"/>
-  <let name="gripper_xacro" value="$(dirname)/../urdf/gripper.urdf.xacro"/>
-  <let name="rviz_config" value="$(dirname)/../config/robot.rviz"/>
+  <let name="ur_overrides" value="$(dirname)/ur_overrides.yaml"/>
+  <let name="gripper_controllers" value="$(dirname)/gripper_controllers.yaml"/>
+  <let name="gripper_xacro" value="$(dirname)/gripper.urdf.xacro"/>
+  <let name="rviz_config" value="$(dirname)/view.rviz"/>
 
   <include file="$(find-pkg-share ur_robot_driver)/launch/ur_control.launch.py">
     <arg name="ur_type" value="ur12e"/>

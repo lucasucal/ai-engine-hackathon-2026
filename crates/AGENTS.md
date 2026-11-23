@@ -2,12 +2,6 @@
 
 ## Rust best practices
 
-### File paths
-
-Use `camino`'s `Utf8Path` and `Utf8PathBuf` instead of `std::path`, so
-conversion to `&str` and `Display` is infallible. Validate once at the boundary
-with `Utf8PathBuf::from_path_buf`, and keep the camino type from there inward.
-
 ### Tests
 
 Assert on shape with `std::assert_matches`, not `assert!(value.is_err())`. A
@@ -26,6 +20,3 @@ inputs already say it.
 Prefer a `From` impl over a helper function like `fn to_x(a) -> X` where
 appropriate; it prevents code duplication. Be more cautious in public-facing
 libraries, where it may unnecessarily increase the API surface.
-
-Prefer deriving traits with `strum` and `derive_more` over hand-rolling similar
-functionality.

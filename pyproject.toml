@@ -17,7 +17,7 @@ line-length = 100
 extend-select = ["I", "UP", "B", "RUF", "ASYNC", "ANN"]
 
 [tool.basedpyright]
-include = ["crates"]
+include = ["test-policy.py"]
 typeCheckingMode = "standard"
 
 [dependency-groups]

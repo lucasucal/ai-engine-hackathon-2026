@@ -61,12 +61,3 @@ unnecessary_self_imports = "warn"
 unneeded_field_pattern = "warn"
 wildcard_enum_match_arm = "warn"
 unwrap_used = "warn"
-
-# Temporary clippy::pedantic suppressions.
-# Let's review them and clean up or promote to permanent if
-# they do more noise than help.
-float_cmp = "allow"
-cast_possible_truncation = "allow"
-cast_precision_loss = "allow"
-cast_sign_loss = "allow"
-suboptimal_flops = "allow"

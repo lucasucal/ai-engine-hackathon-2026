@@ -1,12 +1,27 @@
-[task_config]
-includes = ["crates/policy-runner/tasks.toml"]
-
 [env]
 _.python.venv = { path = ".venv", create = true, uv_create_args = ["--python", "/usr/bin/python3"] }
 
+[tasks.mock-robot]
+description = "UR12e and 2F-140 on mock hardware; takes camera:=true to add the Gemini 336, rviz:=true"
+dir = "{{config_root}}/robot"
+run = "ros2 launch launch.xml robot:=mock"
+
+[tasks.real-robot]
+description = "UR12e, 2F-140 and Gemini 336; takes robot_ip:=<address> (default 192.168.56.101), camera:=false, rviz:=true, headless_mode:=false"
+dir = "{{config_root}}/robot"
+run = "ros2 launch launch.xml robot:=real"
+
+[tasks.test-policy]
+description = "A stand-in policy on port 8000; `mise run test-policy -- --help` lists late, chunked and invalid replies"
+run = "python3 test-policy.py"
+
+[tasks.policy-runner]
+description = "The policy runner; takes --task <task_id>, and --policy <url>, --camera <topic>"
+run = "cargo run --release -p policy-runner --"
+
 [tasks."python:sync"]
 description = "Install the Python dev tools into .venv"
-run = "uv sync"
+run = "uv sync --locked"
 
 [tasks."python:check"]
 description = "Format, lint and type-check the Python code"

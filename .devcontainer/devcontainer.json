@@ -14,7 +14,6 @@
       ]
     }
   },
-  "hostRequirements": { "gpu": "optional" },
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
     "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
@@ -23,7 +22,6 @@
     // RViz renders through GLX, so it needs XWayland, which only lets in
     // clients holding the session's cookie.
     "XAUTHORITY": "/tmp/.Xauthority",
-    "NVIDIA_DRIVER_CAPABILITIES": "all",
     "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
     "ROS_DOMAIN_ID": "42"
   },

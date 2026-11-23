@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- robotiq_description's own 2F-140 file fixes the gripper to `world`; this one mounts it on the arm's `tool0`. -->
+<robot xmlns:xacro="http://wiki.ros.org/xacro" name="robotiq_gripper">
+  <xacro:arg name="use_fake_hardware" default="true"/>
+  <xacro:arg name="com_port" default="/tmp/ttyUR"/>
+
+  <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_140_macro.urdf.xacro"/>
+
+  <link name="tool0"/>
+  <xacro:robotiq_gripper name="RobotiqGripperHardwareInterface" prefix="" parent="tool0"
+                         use_fake_hardware="$(arg use_fake_hardware)" com_port="$(arg com_port)">
+    <!-- Assumes the standard flange mount; confirm with the organisers. -->
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </xacro:robotiq_gripper>
+</robot>

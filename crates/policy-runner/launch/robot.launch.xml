@@ -1,0 +1,62 @@
+<launch>
+  <arg name="robot" default="mock" description="mock or real"/>
+  <arg name="robot_ip" default="192.168.56.101" description="The UR12e's IP address, on real hardware"/>
+
+  <!-- Lowercase, not Python's True: ur_control.launch.py compares use_mock_hardware to "true". -->
+  <let name="mock" value="$(eval '\'true\' if \'$(var robot)\' == \'mock\' else \'false\'')"/>
+  <let name="real" value="$(eval '\'true\' if \'$(var robot)\' == \'real\' else \'false\'')"/>
+  <arg name="camera" default="$(var real)" description="Start the Gemini 336; by default only on real hardware"/>
+  <arg name="rviz" default="false" description="Start RViz showing the arm and gripper"/>
+  <arg name="headless_mode" default="true"
+       description="Send the driver's program on connect, which needs the robot in Remote Control mode; false to play External Control on the pendant in Local mode"/>
+  <!-- Here, as below the includes $(dirname) would be the last included file's. -->
+  <let name="ur_overrides" value="$(dirname)/../config/ur_overrides.yaml"/>
+  <let name="gripper_controllers" value="$(dirname)/../config/gripper_controllers.yaml"/>
+  <let name="gripper_xacro" value="$(dirname)/../urdf/gripper.urdf.xacro"/>
+  <let name="rviz_config" value="$(dirname)/../config/robot.rviz"/>
+
+  <include file="$(find-pkg-share ur_robot_driver)/launch/ur_control.launch.py">
+    <arg name="ur_type" value="ur12e"/>
+    <arg name="robot_ip" value="$(var robot_ip)"/>
+    <arg name="use_mock_hardware" value="$(var mock)"/>
+    <arg name="headless_mode" value="$(var headless_mode)"/>
+    <arg name="update_rate_config_file" value="$(var ur_overrides)"/>
+    <!-- Kilted's joint_trajectory_controller follows the speed slider itself; the scaled one is deprecated and gone in Lyrical. -->
+    <arg name="initial_joint_controller" value="joint_trajectory_controller"/>
+    <arg name="use_tool_communication" value="$(var real)"/>
+    <!-- The 2F-140 runs on 24 V from the wrist connector. -->
+    <arg name="tool_voltage" value="24"/>
+    <arg name="launch_rviz" value="false"/>
+  </include>
+
+  <!-- compressed_image_transport publishes each color frame as JPEG on .../image_raw/compressed. -->
+  <include file="$(find-pkg-share orbbec_camera)/launch/gemini_330_series.launch.py" if="$(var camera)">
+    <arg name="color_width" value="640"/>
+    <arg name="color_height" value="480"/>
+    <arg name="color_fps" value="30"/>
+    <arg name="enable_depth" value="false"/>
+    <arg name="enable_left_ir" value="false"/>
+    <arg name="enable_right_ir" value="false"/>
+    <arg name="enable_point_cloud" value="false"/>
+    <arg name="enable_colored_point_cloud" value="false"/>
+  </include>
+
+  <node pkg="rviz2" exec="rviz2" args="-d $(var rviz_config)" if="$(var rviz)"/>
+
+  <!-- Gives the UR driver time to create /tmp/ttyUR, which the gripper's driver opens. -->
+  <timer period="3.0">
+    <group>
+      <push_ros_namespace namespace="gripper"/>
+      <let name="gripper_description" value="$(command '$(find-exec xacro) $(var gripper_xacro) use_fake_hardware:=$(var mock) com_port:=/tmp/ttyUR')"/>
+
+      <node pkg="robot_state_publisher" exec="robot_state_publisher">
+        <param name="robot_description" value="$(var gripper_description)" type="str"/>
+      </node>
+      <node pkg="controller_manager" exec="ros2_control_node">
+        <param from="$(var gripper_controllers)"/>
+      </node>
+      <node pkg="controller_manager" exec="spawner"
+            args="joint_state_broadcaster finger_position_controller --controller-manager /gripper/controller_manager --param-file $(var gripper_controllers)"/>
+    </group>
+  </timer>
+</launch>

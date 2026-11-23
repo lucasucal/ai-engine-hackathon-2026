@@ -1,0 +1,5 @@
+/target
+.venv/
+__pycache__/
+mise.local.toml
+.claude/settings.local.json

@@ -1,0 +1,360 @@
+use crate::{kinematics::Joints, log::Log};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use color_eyre::{Result, eyre::eyre};
+use parking_lot::Mutex;
+use rclrs::{
+    Context, CreateBasicExecutor, IntoPrimitiveOptions, Node, Publisher, SpinOptions, Subscription,
+};
+use ros_env::{
+    builtin_interfaces::msg::Duration as RosDuration,
+    sensor_msgs::msg::{CompressedImage, JointState},
+    std_msgs::msg::Float64MultiArray,
+    trajectory_msgs::msg::{JointTrajectory, JointTrajectoryPoint},
+};
+use std::{
+    sync::Arc,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+
+/// In the contract's order.
+pub const ARM_JOINTS: [&str; 6] = [
+    "shoulder_pan_joint",
+    "shoulder_lift_joint",
+    "elbow_joint",
+    "wrist_1_joint",
+    "wrist_2_joint",
+    "wrist_3_joint",
+];
+const FINGER_JOINT: &str = "finger_joint";
+pub const FINGER_CLOSED: f64 = 0.695;
+
+const TRAJECTORY_TOPIC: &str = "/joint_trajectory_controller/joint_trajectory";
+const FINGER_COMMAND_TOPIC: &str = "/gripper/finger_position_controller/commands";
+
+const BLACK_JPEG: &[u8] = include_bytes!("../assets/black.jpg");
+const IMAGE_SIZE: (usize, usize) = (640, 480);
+
+#[derive(Debug, Clone)]
+pub struct Received<T> {
+    pub value: T,
+    pub at: Instant,
+}
+
+impl<T> Received<T> {
+    pub fn is_fresh(&self) -> bool {
+        self.at.elapsed() <= STALE_AFTER
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ArmState {
+    pub position: Joints,
+    pub velocity: Joints,
+}
+
+type Latest<T> = Arc<Mutex<Option<Received<T>>>>;
+
+pub struct Ros {
+    arm: Latest<ArmState>,
+    finger: Latest<f64>,
+    camera: Camera,
+    trajectory: Publisher<JointTrajectory>,
+    finger_command: Publisher<Float64MultiArray>,
+    _subscriptions: Subscriptions,
+    _node: Node,
+    _executor_thread: JoinHandle<()>,
+}
+
+enum Camera {
+    Black { base64: String },
+    Topic(Latest<Vec<u8>>),
+}
+
+struct Subscriptions {
+    _arm: Subscription<JointState>,
+    _finger: Subscription<JointState>,
+    _camera: Option<Subscription<CompressedImage>>,
+}
+
+impl Ros {
+    pub fn new(camera_topic: Option<&str>, log: Arc<Log>) -> Result<Self> {
+        let context = Context::default_from_env()?;
+        let mut executor = context.create_basic_executor();
+        let node = executor.create_node("policy_runner")?;
+
+        let arm = Latest::default();
+        let arm_subscription = node.create_subscription("/joint_states", {
+            let arm = Arc::clone(&arm);
+            move |msg: JointState| {
+                let position = by_name(&msg.name, &msg.position, ARM_JOINTS);
+                let velocity = by_name(&msg.name, &msg.velocity, ARM_JOINTS);
+                if let (Some(position), Some(velocity)) = (position, velocity) {
+                    store(&arm, ArmState { position, velocity });
+                }
+            }
+        })?;
+
+        let finger = Latest::default();
+        let finger_subscription = node.create_subscription("/gripper/joint_states", {
+            let finger = Arc::clone(&finger);
+            move |msg: JointState| {
+                if let Some([position]) = by_name(&msg.name, &msg.position, [FINGER_JOINT]) {
+                    store(&finger, position);
+                }
+            }
+        })?;
+
+        let (camera, camera_subscription) = match camera_topic {
+            None => (
+                Camera::Black {
+                    base64: BASE64.encode(BLACK_JPEG),
+                },
+                None,
+            ),
+            Some(topic) => {
+                let frame = Latest::default();
+                // The camera driver publishes best-effort, which a reliable subscription
+                // wouldn't match.
+                let subscription = node.create_subscription(topic.best_effort().keep_last(1), {
+                    let frame = Arc::clone(&frame);
+                    move |msg: CompressedImage| store(&frame, msg.data)
+                })?;
+                (Camera::Topic(frame), Some(subscription))
+            }
+        };
+
+        let trajectory = node.create_publisher(TRAJECTORY_TOPIC)?;
+        let finger_command = node.create_publisher(FINGER_COMMAND_TOPIC)?;
+
+        let executor_thread = thread::spawn(move || {
+            for error in executor.spin(SpinOptions::default()) {
+                log.push(format!("ROS executor: {error}"));
+            }
+        });
+
+        Ok(Self {
+            arm,
+            finger,
+            camera,
+            trajectory,
+            finger_command,
+            _subscriptions: Subscriptions {
+                _arm: arm_subscription,
+                _finger: finger_subscription,
+                _camera: camera_subscription,
+            },
+            _node: node,
+            _executor_thread: executor_thread,
+        })
+    }
+
+    pub fn arm(&self) -> Option<Received<ArmState>> {
+        latest(&self.arm)
+    }
+
+    pub fn finger(&self) -> Option<Received<f64>> {
+        latest(&self.finger)
+    }
+
+    /// Whether the camera's latest frame is fresh; None without a camera topic.
+    pub fn camera_live(&self) -> Option<bool> {
+        match &self.camera {
+            Camera::Black { .. } => None,
+            Camera::Topic(frame) => Some(frame.lock().as_ref().is_some_and(Received::is_fresh)),
+        }
+    }
+
+    /// The latest camera frame, base64-encoded, once it passes the frame checks; or the black
+    /// frame without a camera.
+    pub fn image(&self) -> Result<String> {
+        match &self.camera {
+            Camera::Black { base64 } => Ok(base64.clone()),
+            Camera::Topic(frame) => {
+                let frame = latest(frame).ok_or_else(|| eyre!("no camera frame received yet"))?;
+                check_frame(&frame.value, frame.at.elapsed())?;
+                Ok(BASE64.encode(&frame.value))
+            }
+        }
+    }
+
+    /// One point per entry of `positions`, `segment` apart, starting on receipt.
+    pub fn send_trajectory(&self, positions: &[Joints], segment: Duration) -> Result<()> {
+        let points = positions
+            .iter()
+            .zip(1..)
+            .map(|(position, i)| JointTrajectoryPoint {
+                positions: position.to_vec(),
+                time_from_start: ros_duration(segment * i),
+                ..Default::default()
+            })
+            .collect();
+        self.publish_trajectory(points)
+    }
+
+    /// Like `send_trajectory`, for an episode's steps: each point also carries the velocity of the
+    /// step ending at it, so the controller runs one message into the next instead of slowing to a
+    /// stop at the end of every step.
+    pub fn send_steps(&self, from: &Joints, positions: &[Joints], segment: Duration) -> Result<()> {
+        let points = positions
+            .iter()
+            .zip(step_velocities(from, positions, segment))
+            .zip(1..)
+            .map(|((position, velocity), i)| JointTrajectoryPoint {
+                positions: position.to_vec(),
+                velocities: velocity.to_vec(),
+                time_from_start: ros_duration(segment * i),
+                ..Default::default()
+            })
+            .collect();
+        self.publish_trajectory(points)
+    }
+
+    /// Makes the arm hold `position` at once, dropping the trajectory it was following.
+    pub fn hold(&self, position: &Joints) -> Result<()> {
+        self.publish_trajectory(vec![JointTrajectoryPoint {
+            positions: position.to_vec(),
+            ..Default::default()
+        }])
+    }
+
+    pub fn command_finger(&self, position: f64) -> Result<()> {
+        self.finger_command.publish(Float64MultiArray {
+            data: vec![position],
+            ..Default::default()
+        })?;
+        Ok(())
+    }
+
+    fn publish_trajectory(&self, points: Vec<JointTrajectoryPoint>) -> Result<()> {
+        self.trajectory.publish(JointTrajectory {
+            joint_names: ARM_JOINTS.map(str::to_owned).to_vec(),
+            points,
+            ..Default::default()
+        })?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum FrameError {
+    #[error("the latest camera frame is {} ms old", .0.as_millis())]
+    Stale(Duration),
+    #[error("the camera frame is not a JPEG")]
+    NotJpeg,
+    #[error("the camera frame is {width}×{height}, not {}×{}", IMAGE_SIZE.0, IMAGE_SIZE.1)]
+    WrongSize { width: usize, height: usize },
+}
+
+const STALE_AFTER: Duration = Duration::from_millis(100);
+
+fn check_frame(jpeg: &[u8], age: Duration) -> Result<(), FrameError> {
+    if age > STALE_AFTER {
+        return Err(FrameError::Stale(age));
+    }
+    if !matches!(imagesize::image_type(jpeg), Ok(imagesize::ImageType::Jpeg)) {
+        return Err(FrameError::NotJpeg);
+    }
+    let size = imagesize::blob_size(jpeg).map_err(|_| FrameError::NotJpeg)?;
+    if (size.width, size.height) != IMAGE_SIZE {
+        return Err(FrameError::WrongSize {
+            width: size.width,
+            height: size.height,
+        });
+    }
+    Ok(())
+}
+
+fn by_name<const N: usize>(
+    names: &[String],
+    values: &[f64],
+    wanted: [&str; N],
+) -> Option<[f64; N]> {
+    let mut found = [0.0; N];
+    for (slot, name) in found.iter_mut().zip(wanted) {
+        let index = names.iter().position(|n| n == name)?;
+        *slot = *values.get(index)?;
+    }
+    // `ros2_control` state interfaces can read NaN before the hardware fills them in.
+    found.iter().all(|v| v.is_finite()).then_some(found)
+}
+
+fn store<T>(latest: &Mutex<Option<Received<T>>>, value: T) {
+    *latest.lock() = Some(Received {
+        value,
+        at: Instant::now(),
+    });
+}
+
+fn latest<T: Clone>(latest: &Mutex<Option<Received<T>>>) -> Option<Received<T>> {
+    latest.lock().clone()
+}
+
+/// The average velocity over each step, each from the position before it.
+fn step_velocities(from: &Joints, positions: &[Joints], segment: Duration) -> Vec<Joints> {
+    let seconds = segment.as_secs_f64();
+    positions
+        .iter()
+        .scan(*from, |previous, position| {
+            let velocity =
+                std::array::from_fn(|joint| (position[joint] - previous[joint]) / seconds);
+            *previous = *position;
+            Some(velocity)
+        })
+        .collect()
+}
+
+fn ros_duration(duration: Duration) -> RosDuration {
+    RosDuration {
+        sec: i32::try_from(duration.as_secs()).unwrap_or(i32::MAX),
+        nanosec: duration.subsec_nanos(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::assert_matches;
+    use test_case::test_case;
+
+    /// Just enough of a JPEG for its size to be read: start of image, then a baseline frame
+    /// header for a 1280×800, three-component image.
+    const JPEG_1280X800: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x03, 0x20, 0x05, 0x00, 0x03, 0x01, 0x22, 0x00,
+        0x02, 0x11, 0x01, 0x03, 0x11, 0x01, 0xFF, 0xD9,
+    ];
+    const PNG_SIGNATURE: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+    #[test_case(BLACK_JPEG, 10 => Ok(()); "valid frame")]
+    #[test_case(BLACK_JPEG, 150 => Err(FrameError::Stale(Duration::from_millis(150))); "stale frame")]
+    #[test_case(PNG_SIGNATURE, 10 => Err(FrameError::NotJpeg); "not a JPEG")]
+    #[test_case(JPEG_1280X800, 10 => Err(FrameError::WrongSize { width: 1280, height: 800 }); "wrong size")]
+    fn frame_checks(jpeg: &[u8], age_ms: u64) -> Result<(), FrameError> {
+        check_frame(jpeg, Duration::from_millis(age_ms))
+    }
+
+    #[test_case(&[[0.25; 6]] => vec![[0.5; 6]])]
+    #[test_case(&[[0.25; 6], [0.75; 6]] => vec![[0.5; 6], [1.0; 6]])]
+    #[test_case(&[[0.0, 0.5, -0.5, 0.0, 0.0, 0.0]] => vec![[0.0, 1.0, -1.0, 0.0, 0.0, 0.0]])]
+    fn velocities_per_step(positions: &[Joints]) -> Vec<Joints> {
+        step_velocities(&[0.0; 6], positions, Duration::from_millis(500))
+    }
+
+    #[test]
+    fn joints_by_name_in_any_order() {
+        let names = [
+            "elbow_joint",
+            "shoulder_lift_joint",
+            "shoulder_pan_joint",
+            "wrist_1_joint",
+            "wrist_2_joint",
+            "wrist_3_joint",
+        ]
+        .map(str::to_owned);
+        let values = [3.0, 2.0, 1.0, 4.0, 5.0, 6.0];
+        assert_matches!(
+            by_name(&names, &values, ARM_JOINTS),
+            Some([1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+        );
+    }
+}

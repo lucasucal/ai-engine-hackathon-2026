@@ -1,0 +1,15 @@
+# Wildcards, as the controller manager and its controllers run in the /gripper namespace.
+/**/controller_manager:
+  ros__parameters:
+    update_rate: 100  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    finger_position_controller:
+      type: position_controllers/JointGroupPositionController
+
+/**/finger_position_controller:
+  ros__parameters:
+    joints:
+      - finger_joint

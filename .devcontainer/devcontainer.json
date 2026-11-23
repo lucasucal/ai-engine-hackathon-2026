@@ -1,0 +1,52 @@
+{
+  "name": "AI Engine Hackathon 2026",
+  "remoteUser": "rosdev",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "USERNAME": "rosdev"
+    },
+    "cacheFrom": "ghcr.io/whistlerobotics/ai-engine-hackathon-2026-devcontainer:buildcache"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+      ]
+    }
+  },
+  "hostRequirements": { "gpu": "optional" },
+  "containerEnv": {
+    "DISPLAY": "${localEnv:DISPLAY}",
+    "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",
+    "XDG_SESSION_TYPE": "${localEnv:XDG_SESSION_TYPE}",
+    "XDG_RUNTIME_DIR": "/tmp/runtime-rosdev",
+    // RViz renders through GLX, so it needs XWayland, which only lets in
+    // clients holding the session's cookie.
+    "XAUTHORITY": "/tmp/.Xauthority",
+    "NVIDIA_DRIVER_CAPABILITIES": "all",
+    "ROS_AUTOMATIC_DISCOVERY_RANGE": "LOCALHOST",
+    "ROS_DOMAIN_ID": "42"
+  },
+  // No postCreateCommand or other lifecycle commands: set things up in the
+  // Dockerfile, so that the image is complete on its own.
+  "workspaceFolder": "/home/rosdev/ros2_ws",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/home/rosdev/ros2_ws/,type=bind",
+  "mounts": [
+    "source=/tmp/.X11-unix,target=/tmp/.X11-unix,type=bind,consistency=cached",
+    "source=${localEnv:XDG_RUNTIME_DIR},target=/tmp/runtime-rosdev,type=bind",
+    "source=${localEnv:XAUTHORITY},target=/tmp/.Xauthority,type=bind,readonly",
+    "source=/dev/dri,target=/dev/dri,type=bind,consistency=cached",
+    // A bind mount rather than --device, so a camera plugged in after the
+    // container starts is still seen; the cgroup rule below lets it be opened.
+    "source=/dev/bus/usb,target=/dev/bus/usb,type=bind",
+    "source=${localEnv:HOME}/.ssh,target=/home/rosdev/.ssh,type=bind,consistency=cached,readonly",
+    "source=${localEnv:HOME}/.gitconfig,target=/home/rosdev/.gitconfig,type=bind,consistency=cached,readonly"
+  ],
+  "runArgs": [
+    "--net=host",
+    "--pid=host",
+    "--ipc=host",
+    "--device=/dev/dri",
+    "--device-cgroup-rule=c 189:* rmw"
+  ]
+}

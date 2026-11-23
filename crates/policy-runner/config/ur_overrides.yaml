@@ -1,0 +1,14 @@
+# Loaded as the UR bringup's update_rate_config_file, so it replaces ur12e_update_rate.yaml: the
+# controller manager also hands this file to the controllers it loads, which lets these settings
+# sit on top of ur_robot_driver's own ur_controllers.yaml instead of a copy of it.
+controller_manager:
+  ros__parameters:
+    update_rate: 500  # Hz, as ur12e_update_rate.yaml
+
+joint_trajectory_controller:
+  ros__parameters:
+    # The runner sends one short trajectory per 50 ms step. Starting each from the previous
+    # reference rather than the lagging measured joints, and letting each end in motion, joins
+    # them into one smooth motion instead of a judder at 20 Hz.
+    interpolate_from_desired_state: true
+    allow_nonzero_velocity_at_trajectory_end: true

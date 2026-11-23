@@ -1,0 +1,14 @@
+[task_config]
+includes = ["crates/policy-runner/tasks.toml"]
+
+[env]
+_.python.venv = { path = ".venv", create = true, uv_create_args = ["--python", "/usr/bin/python3"] }
+
+[tasks."python:sync"]
+description = "Install the Python dev tools into .venv"
+run = "uv sync"
+
+[tasks."python:check"]
+description = "Format, lint and type-check the Python code"
+depends = ["python:sync"]
+run = ["ruff format", "ruff check", "basedpyright"]

@@ -1,0 +1,72 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+base64 = "0.23.1"
+clap = "4.6.8"
+color-eyre = "0.6.5"
+ctrlc = "3.5.3"
+imagesize = "0.15.0"
+nalgebra = "0.35.0"
+parking_lot = "0.12.5"
+ratatui = "0.30.2"
+rclrs = "0.8.0"
+ros-env = "0.3.0"
+serde = "1.0.229"
+serde_json = "1.0.154"
+test-case = "3.4.1"
+thiserror = "2.0.21"
+ureq = { version = "3.5.2", default-features = false }
+
+[profile.release]
+lto = "thin"
+
+[workspace.lints.rust]
+single_use_lifetimes = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unsafe_code = "warn"
+unused_crate_dependencies = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -2 }
+correctness = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+# `clippy::restriction` lints need to be handpicked,
+# blanket group setting is not recommended.
+allow_attributes = "warn"
+empty_enum_variants_with_brackets = "warn"
+expect_used = "warn"
+get_unwrap = "warn"
+mixed_read_write_in_expression = "warn"
+multiple_inherent_impl = "warn"
+needless_raw_strings = "warn"
+redundant_type_annotations = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+self_named_module_files = "warn"
+str_to_string = "warn"
+unnecessary_self_imports = "warn"
+unneeded_field_pattern = "warn"
+wildcard_enum_match_arm = "warn"
+unwrap_used = "warn"
+
+# Temporary clippy::pedantic suppressions.
+# Let's review them and clean up or promote to permanent if
+# they do more noise than help.
+float_cmp = "allow"
+cast_possible_truncation = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+suboptimal_flops = "allow"

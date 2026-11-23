@@ -1,5 +1,6 @@
 use crate::{
     episode::Progress,
+    gripper::GripperHardware,
     log::Log,
     policy::{PolicyStatus, Readiness},
     ros::{Received, Ros},
@@ -73,6 +74,10 @@ pub struct Robot {
     /// None without a camera topic.
     pub camera_live: Option<bool>,
     pub at_start: bool,
+    /// The pendant's speed slider, in percent; None while stale.
+    pub speed_scaling: Option<f64>,
+    /// None until the gripper's robot description arrives.
+    pub gripper_hardware: Option<GripperHardware>,
 }
 
 impl Robot {
@@ -84,6 +89,11 @@ impl Robot {
             camera_live: ros.camera_live(),
             at_start: arm
                 .is_some_and(|arm| distance_to_start(&arm.value.position) <= AT_START_TOLERANCE),
+            speed_scaling: ros
+                .speed_scaling()
+                .filter(Received::is_fresh)
+                .map(|received| received.value),
+            gripper_hardware: ros.gripper_hardware(),
         }
     }
 }
@@ -312,6 +322,8 @@ mod tests {
         gripper_live: true,
         camera_live: None,
         at_start: false,
+        speed_scaling: Some(100.0),
+        gripper_hardware: None,
     };
 
     fn shared_with(readiness: Option<Readiness>) -> Shared {

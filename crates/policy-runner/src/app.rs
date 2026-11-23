@@ -3,7 +3,7 @@ use crate::{
     log::Log,
     policy::{PolicyStatus, Readiness},
     ros::{Received, Ros},
-    worker::START_POSE,
+    worker::distance_to_start,
 };
 use parking_lot::Mutex;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -82,13 +82,8 @@ impl Robot {
             arm_live: arm.is_some(),
             gripper_live: ros.finger().as_ref().is_some_and(Received::is_fresh),
             camera_live: ros.camera_live(),
-            at_start: arm.is_some_and(|arm| {
-                arm.value
-                    .position
-                    .iter()
-                    .zip(START_POSE)
-                    .all(|(q, s)| (q - s).abs() <= AT_START_TOLERANCE)
-            }),
+            at_start: arm
+                .is_some_and(|arm| distance_to_start(&arm.value.position) <= AT_START_TOLERANCE),
         }
     }
 }
@@ -196,7 +191,7 @@ impl<'a> App<'a> {
     /// Sends `command` to the arm worker and enters `phase` at once, so that a second key
     /// press cannot queue another command; or logs why not.
     fn send(&self, command: Command, phase: Phase, robot: Robot) {
-        if let Some(reason) = self.refusal(robot) {
+        if let Some(reason) = self.refusal(&command, robot) {
             self.shared.log.push(format!("Enter refused: {reason}."));
             return;
         }
@@ -207,17 +202,22 @@ impl<'a> App<'a> {
         }
     }
 
-    fn refusal(&self, robot: Robot) -> Option<String> {
+    /// Moving to the start pose commands only the arm, so it needs neither the policy nor the
+    /// gripper.
+    fn refusal(&self, command: &Command, robot: Robot) -> Option<String> {
+        let episode = matches!(command, Command::RunEpisode { .. });
         let mut reasons = Vec::new();
-        match self.shared.policy.lock().as_ref() {
-            Some(status) if status.readiness == Readiness::Ready => {}
-            Some(status) => reasons.push(format!("the policy is {}", status.readiness)),
-            None => reasons.push("the policy has not been polled yet".to_owned()),
+        if episode {
+            match self.shared.policy.lock().as_ref() {
+                Some(status) if status.readiness == Readiness::Ready => {}
+                Some(status) => reasons.push(format!("the policy is {}", status.readiness)),
+                None => reasons.push("the policy has not been polled yet".to_owned()),
+            }
         }
         if !robot.arm_live {
             reasons.push("the arm's joint state is stale".to_owned());
         }
-        if !robot.gripper_live {
+        if episode && !robot.gripper_live {
             reasons.push("the gripper's joint state is stale".to_owned());
         }
         (!reasons.is_empty()).then(|| reasons.join("; "))
@@ -338,26 +338,46 @@ mod tests {
             .collect()
     }
 
-    #[test_case(None, LIVE => "Enter refused: the policy has not been polled yet."; "not polled")]
-    #[test_case(Some(Readiness::Unreachable("refused".to_owned())), LIVE
-        => "Enter refused: the policy is unreachable (refused)."; "unreachable")]
-    #[test_case(Some(Readiness::NotReady), LIVE => "Enter refused: the policy is not ready."; "not ready")]
+    #[test_case(Phase::Idle, Some(Readiness::Ready), Robot { arm_live: false, ..LIVE }
+        => "Enter refused: the arm's joint state is stale."; "move with stale arm")]
+    #[test_case(Phase::AtStart, None, LIVE
+        => "Enter refused: the policy has not been polled yet."; "episode, policy not polled")]
+    #[test_case(Phase::AtStart, Some(Readiness::Unreachable("refused".to_owned())), LIVE
+        => "Enter refused: the policy is unreachable (refused)."; "episode, policy unreachable")]
+    #[test_case(Phase::AtStart, Some(Readiness::NotReady), LIVE
+        => "Enter refused: the policy is not ready."; "episode, policy not ready")]
     #[test_case(
+        Phase::AtStart,
         Some(Readiness::Incompatible { contract: Some("v1".to_owned()), schema_version: Some(2) }),
         LIVE
         => "Enter refused: the policy is incompatible: contract v1, schema version 2, not v0, 2.";
-        "incompatible")]
-    #[test_case(Some(Readiness::Ready), Robot { arm_live: false, ..LIVE }
-        => "Enter refused: the arm's joint state is stale."; "stale arm")]
-    #[test_case(Some(Readiness::Ready), Robot { gripper_live: false, ..LIVE }
-        => "Enter refused: the gripper's joint state is stale."; "stale gripper")]
-    fn enter_refused(readiness: Option<Readiness>, robot: Robot) -> String {
+        "episode, policy incompatible")]
+    #[test_case(Phase::AtStart, Some(Readiness::Ready), Robot { arm_live: false, ..LIVE }
+        => "Enter refused: the arm's joint state is stale."; "episode with stale arm")]
+    #[test_case(Phase::AtStart, Some(Readiness::Ready), Robot { gripper_live: false, ..LIVE }
+        => "Enter refused: the gripper's joint state is stale."; "episode with stale gripper")]
+    fn enter_refused(phase: Phase, readiness: Option<Readiness>, robot: Robot) -> String {
         let shared = shared_with(readiness);
+        *shared.phase.lock() = phase;
         let (mut app, received) = app(&shared);
         app.handle(press(KeyCode::Enter), robot);
         assert_matches!(received.try_recv(), Err(_));
-        assert_eq!(*shared.phase.lock(), Phase::Idle);
+        assert_eq!(*shared.phase.lock(), phase);
         last_log(&shared)
+    }
+
+    #[test_case(None, LIVE; "policy not polled")]
+    #[test_case(Some(Readiness::Unreachable("refused".to_owned())), LIVE; "policy unreachable")]
+    #[test_case(Some(Readiness::Ready), Robot { gripper_live: false, ..LIVE }; "stale gripper")]
+    fn move_to_start_needs_only_the_arm(readiness: Option<Readiness>, robot: Robot) {
+        let shared = shared_with(readiness);
+        let (mut app, received) = app(&shared);
+        app.handle(press(KeyCode::Enter), robot);
+        assert_eq!(*shared.phase.lock(), Phase::MovingToStart);
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            [Command::MoveToStart]
+        );
     }
 
     #[test]

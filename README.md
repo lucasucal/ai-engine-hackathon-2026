@@ -53,8 +53,3 @@ mise run policy-runner -- --task <task_id> --policy <url> --camera /camera/color
 By default `real-robot` sends the driver's program on connect, which needs the arm in Remote Control
 mode; with `headless_mode:=false`, play External Control on the pendant in Local mode instead. It
 also starts the Gemini 336 unless given `camera:=false`.
-
-## Python
-
-Python dependencies are managed with [uv](https://docs.astral.sh/uv), in `pyproject.toml`. mise
-creates and activates `.venv`; `mise run python:check` formats, lints and type-checks.

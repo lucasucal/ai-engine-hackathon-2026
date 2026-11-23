@@ -8,12 +8,6 @@
     },
     "cacheFrom": "ghcr.io/whistlerobotics/ai-engine-hackathon-2026-devcontainer:buildcache"
   },
-  "customizations": {
-    "vscode": {
-      "extensions": [
-      ]
-    }
-  },
   "containerEnv": {
     "DISPLAY": "${localEnv:DISPLAY}",
     "WAYLAND_DISPLAY": "${localEnv:WAYLAND_DISPLAY}",

@@ -1,5 +1,7 @@
 [env]
-_.python.venv = { path = ".venv", create = true, uv_create_args = ["--python", "/usr/bin/python3"] }
+# Activating the venv puts its python3 first on PATH, so ROS's `#!/usr/bin/env python3` scripts run on
+# it, like the UR driver's tool_communication.py; they need the apt-installed packages beside ROS.
+_.python.venv = { path = ".venv", create = true, uv_create_args = ["--python", "/usr/bin/python3", "--system-site-packages"] }
 
 [tasks.mock-robot]
 description = "UR12e and 2F-140 on mock hardware; takes camera:=true to add the Gemini 336, rviz:=true"

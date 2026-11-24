@@ -10,11 +10,21 @@
 # ///
 """Record demonstrations as episodes of API.md's /act observations, one JSON file each.
 
-On start it puts the arm in freedrive: it deactivates whichever controllers command the arm's joints,
-activates freedrive_mode_controller and keeps freedrive enabled. When it stops, by Ctrl-C or
-otherwise, it ends freedrive and reactivates those controllers, which hold the arm where it is. If
-freedrive_mode_controller is already active, it cannot tell what came before and reactivates
-joint_trajectory_controller. With --no-freedrive it leaves the controllers alone.
+The arm is in freedrive only while the button is held. Pressing it deactivates whichever controllers
+command the arm's joints, activates freedrive_mode_controller and keeps freedrive enabled, then
+starts an episode; releasing it saves the episode, ends freedrive and reactivates those controllers,
+which hold the arm where it is. Stopping the recorder, by Ctrl-C or otherwise, ends freedrive too.
+If freedrive_mode_controller is already active on a press, it cannot tell what came before and
+reactivates joint_trajectory_controller. With --no-freedrive it leaves the controllers alone.
+
+The throttle drives the gripper the whole time it runs, at 50 Hz: its voltage on analog input 1 is
+scaled linearly from --throttle-open-v, opened as wide as --gripper-max-opening allows (70% by
+default), to --throttle-closed-v, fully closed, with no filtering. The command then only changes
+once the throttle asks for a position --gripper-hysteresis-steps or more away from it, or for
+either end of that range, so the throttle's
+noise cannot make the gripper twitch between neighbouring positions. A reading outside 0.75-4.5 V
+or not in voltage mode is taken as a fault, such as a loose wire, and the gripper then holds where
+it is rather than opening.
 
 Start it with the button released, as whatever the digital input reads then counts as released,
 unless --pressed-state says otherwise. An episode runs while the button is held: it starts when the
@@ -22,8 +32,9 @@ button is pressed and ends when it is released.
 
 Each 50 ms step in the file's `steps` has the `step`, `images` and `proprio` of an /act request,
 with the palm pose computed as the policy runner computes it, plus `t`, the seconds since the
-episode started. `proprio.gripper` is null while /gripper/joint_states is not publishing, and
-`images.top` is null, as nothing records the camera yet.
+episode started, and `gripper_command`, the opening last commanded from the throttle in
+proprio.gripper's units. `proprio.gripper` is null while /gripper/joint_states is not publishing,
+and `images.top` is null, as nothing records the camera yet.
 
     uv run record.py --task-id bench_lift_can_v0
 
@@ -53,8 +64,8 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from rclpy.utilities import remove_ros_args
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
-from ur_msgs.msg import IOStates
+from std_msgs.msg import Bool, Float64MultiArray
+from ur_msgs.msg import Analog, IOStates
 
 SCHEMA_VERSION = 2
 STEP_S = 0.05
@@ -70,6 +81,20 @@ ARM_JOINTS = (
 )
 FINGER_JOINT = "finger_joint"
 FINGER_CLOSED = 0.695
+FINGER_COMMAND_TOPIC = "/gripper/finger_position_controller/commands"
+# The gripper's driver passes a new target on only every 15-20 ms, so faster gains nothing.
+GRIPPER_COMMAND_S = 0.02
+# throttle_cal measured 0.84 V released and 4.35 V pressed fully; these ends sit just inside, so
+# noise and a resting thumb still read as fully open, and every full press as fully closed.
+THROTTLE_OPEN_V = 0.90
+THROTTLE_CLOSED_V = 4.32
+THROTTLE_VALID_V = (0.75, 4.50)
+# The gripper's driver spreads 0 to FINGER_CLOSED over 227 steps of its position register.
+GRIPPER_STEP_RAD = FINGER_CLOSED / 227
+# Held still mid-travel, the throttle's raw reading spanned up to 1.5 steps, peak to peak.
+GRIPPER_HYSTERESIS_STEPS = 2.0
+# The widest the throttle opens the gripper, in proprio.gripper's units: 1 fully open, 0 closed.
+GRIPPER_MAX_OPENING = 0.7
 FREEDRIVE_CONTROLLER = "freedrive_mode_controller"
 DEFAULT_ARM_CONTROLLER = "joint_trajectory_controller"
 # freedrive_mode_controller ends freedrive after its inactive_timeout, 1 s, without a message.
@@ -167,12 +192,28 @@ class ArmState:
     velocity: np.ndarray
 
 
+@dataclass
+class AnalogReading:
+    at: float
+    domain: int
+    value: float
+
+
 class Robot:
-    def __init__(self, node: Node, pin: int, pressed_state: int | None, debounce_s: float) -> None:
+    def __init__(
+        self,
+        node: Node,
+        pin: int,
+        pressed_state: int | None,
+        debounce_s: float,
+        throttle_pin: int,
+    ) -> None:
         self.pin = pin
         self.pressed_state = pressed_state
         self.debouncer = Debouncer(debounce_s)
         self.button_pressed: queue.Queue[bool] = queue.Queue()
+        self.throttle_pin = throttle_pin
+        self.throttle: AnalogReading | None = None
         self.arm: ArmState | None = None
         self.finger: tuple[float, float] | None = None
         self.io_first_at: float | None = None
@@ -198,6 +239,9 @@ class Robot:
 
     def on_io(self, msg: IOStates) -> None:
         now = time.monotonic()
+        throttle = next((a for a in msg.analog_in_states if a.pin == self.throttle_pin), None)
+        if throttle is not None:
+            self.throttle = AnalogReading(now, throttle.domain, throttle.state)
         state = next((int(d.state) for d in msg.digital_in_states if d.pin == self.pin), None)
         if state is None:
             return
@@ -229,6 +273,85 @@ class Robot:
         return float(np.clip(1.0 - finger[1] / FINGER_CLOSED, 0.0, 1.0))
 
 
+def opening_to_angle(opening: float) -> float:
+    return (1.0 - opening) * FINGER_CLOSED
+
+
+def finger_angle(volts: float, open_v: float, closed_v: float, open_angle: float) -> float:
+    fraction = (volts - open_v) / (closed_v - open_v)
+    if fraction <= 0.0:
+        return open_angle
+    if fraction >= 1.0:
+        return FINGER_CLOSED
+    return open_angle + fraction * (FINGER_CLOSED - open_angle)
+
+
+class Hysteresis:
+    """Holds a value until its input moves `band` from it, or reaches either end of its range."""
+
+    def __init__(self, band: float, low: float, high: float) -> None:
+        self.band, self.low, self.high = band, low, high
+        self.value: float | None = None
+
+    def update(self, target: float) -> float:
+        held = self.value
+        at_end = target in (self.low, self.high)
+        if held is None or abs(target - held) >= self.band or (at_end and target != held):
+            self.value = held = target
+        return held
+
+
+class Throttle:
+    """Commands the gripper from the throttle's voltage: released opens it, pressed closes it."""
+
+    def __init__(
+        self,
+        node: Node,
+        robot: Robot,
+        open_v: float,
+        closed_v: float,
+        max_opening: float,
+        hysteresis_rad: float,
+    ) -> None:
+        self.robot = robot
+        self.open_v, self.closed_v = open_v, closed_v
+        self.open_angle = opening_to_angle(max_opening)
+        self.command = Hysteresis(hysteresis_rad, self.open_angle, FINGER_CLOSED)
+        self.publisher = node.create_publisher(Float64MultiArray, FINGER_COMMAND_TOPIC, 10)
+        self.angle: float | None = None
+        self.fault: str | None = "no fresh reading"
+        node.create_timer(GRIPPER_COMMAND_S, self.update)
+
+    def update(self) -> None:
+        reading = self.robot.throttle
+        fault = self.check(reading, time.monotonic())
+        if fault != self.fault:
+            pin = self.robot.throttle_pin
+            print(
+                f"Throttle on analog input {pin}: {fault}, so the gripper holds."
+                if fault
+                else f"Throttle on analog input {pin} drives the gripper."
+            )
+            self.fault = fault
+        if fault is None and reading is not None:
+            target = finger_angle(reading.value, self.open_v, self.closed_v, self.open_angle)
+            self.angle = self.command.update(target)
+            self.publisher.publish(Float64MultiArray(data=[self.angle]))
+
+    def check(self, reading: AnalogReading | None, now: float) -> str | None:
+        if reading is None or now - reading.at > STALE_AFTER_S:
+            return "no fresh reading"
+        if reading.domain != Analog.VOLTAGE:
+            return "not in voltage mode"
+        low, high = THROTTLE_VALID_V
+        if not low <= reading.value <= high:
+            return f"reads {reading.value:.2f} V, outside {low}-{high} V"
+        return None
+
+    def commanded_opening(self) -> float | None:
+        return None if self.angle is None else 1.0 - self.angle / FINGER_CLOSED
+
+
 @dataclass
 class Episode:
     task_id: str
@@ -238,7 +361,7 @@ class Episode:
     steps: list[dict[str, Any]] = field(default_factory=list)
     stale_steps: int = 0
 
-    def add_step(self, now: float, robot: Robot) -> None:
+    def add_step(self, now: float, robot: Robot, gripper_command: float | None) -> None:
         proprio: dict[str, Any] = {
             "joint_pos": None,
             "joint_vel": None,
@@ -263,6 +386,7 @@ class Episode:
                 "t": round(now - self.start, 4),
                 "images": {"top": None},
                 "proprio": proprio,
+                "gripper_command": gripper_command,
             }
         )
 
@@ -334,10 +458,12 @@ class Freedrive:
         if self.engaged:
             self.enable.publish(Bool(data=True))
 
-    def start(self) -> None:
+    def connect(self) -> None:
         for client in (self.lister, self.switcher):
             if not client.wait_for_service(timeout_sec=5.0):
                 raise ControllerError(f"cannot reach {self.controller_manager}")
+
+    def start(self) -> None:
         active = [
             c
             for c in call(self.lister, ListControllers.Request()).controller
@@ -347,7 +473,7 @@ class Freedrive:
             self.restore = [DEFAULT_ARM_CONTROLLER]
             print(
                 f"{FREEDRIVE_CONTROLLER} was already active, so {DEFAULT_ARM_CONTROLLER} "
-                "takes over on exit."
+                "takes over when it ends."
             )
         else:
             self.restore = [
@@ -358,7 +484,7 @@ class Freedrive:
             self.switch(activate=[FREEDRIVE_CONTROLLER], deactivate=self.restore)
         self.engaged = True
         self.keep_alive()
-        print(f"Freedrive on. On exit it ends and {self.restored()} takes over again.")
+        print("Freedrive on.")
 
     def stop(self) -> None:
         if not self.engaged:
@@ -388,6 +514,22 @@ class Freedrive:
         return f"ros2 control switch_controllers --deactivate {FREEDRIVE_CONTROLLER}{activate}"
 
 
+def enter_freedrive(freedrive: Freedrive) -> bool:
+    try:
+        freedrive.start()
+    except ControllerError as error:
+        print(f"Not starting: could not enter freedrive ({error}).")
+        return False
+    return True
+
+
+def leave_freedrive(freedrive: Freedrive) -> None:
+    try:
+        freedrive.stop()
+    except ControllerError as error:
+        print(f"Could not leave freedrive ({error}). Run:\n  {freedrive.manual_stop_command()}")
+
+
 def interrupt(signum: int, frame: FrameType | None) -> None:
     raise KeyboardInterrupt
 
@@ -396,7 +538,7 @@ def finish(episode: Episode, out_dir: Path, ended_by: str) -> Path:
     path = episode.save(out_dir, ended_by)
     steps = len(episode.steps)
     stale = f", {episode.stale_steps} without a fresh arm state" if episode.stale_steps else ""
-    print(f"\nSaved {steps} steps ({steps * STEP_S:.2f} s{stale}) to {path}")
+    print(f"Saved {steps} steps ({steps * STEP_S:.2f} s{stale}) to {path}")
     return path
 
 
@@ -435,14 +577,56 @@ def main() -> int:
         action="store_true",
         help="leave the controllers alone, for freedrive started and ended by hand",
     )
+    parser.add_argument(
+        "--throttle-pin", type=int, default=1, help="the throttle's analog input (default 1)"
+    )
+    parser.add_argument(
+        "--throttle-open-v",
+        type=float,
+        default=THROTTLE_OPEN_V,
+        help=f"at or below this the gripper is fully open (default {THROTTLE_OPEN_V} V)",
+    )
+    parser.add_argument(
+        "--throttle-closed-v",
+        type=float,
+        default=THROTTLE_CLOSED_V,
+        help=f"at or above this the gripper is fully closed (default {THROTTLE_CLOSED_V} V)",
+    )
+    parser.add_argument(
+        "--gripper-hysteresis-steps",
+        type=float,
+        default=GRIPPER_HYSTERESIS_STEPS,
+        help="the gripper command changes only when the throttle asks for this many of the "
+        "gripper's 227 position steps away; 0 turns it off "
+        f"(default {GRIPPER_HYSTERESIS_STEPS:g}, about 0.6 mm at the fingertips each)",
+    )
+    parser.add_argument(
+        "--gripper-max-opening",
+        type=float,
+        default=GRIPPER_MAX_OPENING,
+        help="how far the released throttle opens the gripper, and the most it ever opens: "
+        f"1 fully open, 0 closed (default {GRIPPER_MAX_OPENING:g})",
+    )
     args = parser.parse_args(remove_ros_args(sys.argv)[1:])
+    if args.throttle_open_v >= args.throttle_closed_v:
+        parser.error("--throttle-open-v must be below --throttle-closed-v")
+    if not 0.0 < args.gripper_max_opening <= 1.0:
+        parser.error("--gripper-max-opening must be above 0 and at most 1")
 
     # rclpy's own Ctrl-C handler would shut ROS down before the controllers can be switched back.
     rclpy.init(args=sys.argv, signal_handler_options=SignalHandlerOptions.NO)
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGHUP, interrupt)
     node = rclpy.create_node("demo_recorder")
-    robot = Robot(node, args.pin, args.pressed_state, args.debounce_ms / 1000)
+    robot = Robot(node, args.pin, args.pressed_state, args.debounce_ms / 1000, args.throttle_pin)
+    throttle = Throttle(
+        node,
+        robot,
+        args.throttle_open_v,
+        args.throttle_closed_v,
+        args.gripper_max_opening,
+        args.gripper_hysteresis_steps * GRIPPER_STEP_RAD,
+    )
     freedrive = None if args.no_freedrive else Freedrive(node, args.controller_manager)
     executor = SingleThreadedExecutor()
     executor.add_node(node)
@@ -455,7 +639,7 @@ def main() -> int:
     stop_reason = "Ctrl-C"
     try:
         if freedrive is not None:
-            freedrive.start()
+            freedrive.connect()
         print(f"Waiting for the button on digital input {args.pin}. Ctrl-C to quit.")
         started_waiting = time.monotonic()
         while rclpy.ok():
@@ -472,14 +656,21 @@ def main() -> int:
 
             while not robot.button_pressed.empty():
                 pressed = robot.button_pressed.get_nowait()
-                if not pressed and episode is not None:
-                    saved.append(finish(episode, args.out_dir, "release"))
-                    episode = None
-                elif not pressed or episode is not None:
+                if not pressed:
+                    if episode is not None:
+                        saved.append(finish(episode, args.out_dir, "release"))
+                        episode = None
+                    if freedrive is not None:
+                        leave_freedrive(freedrive)
+                elif episode is not None:
                     continue
                 elif robot.fresh_arm(now) is None:
                     print("Not starting: no fresh /joint_states.")
+                elif freedrive is not None and not enter_freedrive(freedrive):
+                    continue
                 else:
+                    # Switching into freedrive takes a moment; the episode starts once it is on.
+                    now = time.monotonic()
                     episode = Episode(args.task_id, now)
                     next_step_at = now
                     no_gripper = robot.fresh_gripper_opening(now) is None
@@ -489,18 +680,18 @@ def main() -> int:
                     print(f"Recording {episode.episode_id}. Release to stop{gripper}.")
 
             if episode is not None and now >= next_step_at:
-                episode.add_step(now, robot)
+                episode.add_step(now, robot, throttle.commanded_opening())
                 next_step_at += STEP_S
                 if now - next_step_at > STEP_S:
                     next_step_at = now + STEP_S
                 steps = len(episode.steps)
                 if steps % 20 == 0:
-                    print(f"\r  step {steps} ({steps * STEP_S:.0f} s)", end="", flush=True)
+                    print(f"  step {steps} ({steps * STEP_S:.0f} s)", flush=True)
             time.sleep(0.002 if episode is not None else 0.01)
     except KeyboardInterrupt:
         pass
     except ControllerError as error:
-        stop_reason = f"could not start freedrive, {error}"
+        stop_reason = f"freedrive unavailable, {error}"
     finally:
         # A second Ctrl-C, or a closing terminal's signal arriving twice, must not cut short saving
         # the episode and leaving freedrive.
@@ -509,12 +700,7 @@ def main() -> int:
         if episode is not None:
             saved.append(finish(episode, args.out_dir, stop_reason))
         if freedrive is not None:
-            try:
-                freedrive.stop()
-            except ControllerError as error:
-                print(
-                    f"Could not leave freedrive ({error}). Run:\n  {freedrive.manual_stop_command()}"
-                )
+            leave_freedrive(freedrive)
         rclpy.try_shutdown()
         spinner.join(timeout=2.0)
 

@@ -9,7 +9,7 @@ dir = "{{config_root}}/robot"
 run = "ros2 launch launch.xml robot:=mock"
 
 [tasks.real-robot]
-description = "UR12e, 2F-140 and Gemini 336; takes robot_ip:=<address> (default 192.168.56.101), camera:=false, rviz:=true, headless_mode:=false"
+description = "UR12e, 2F-140 and Gemini 336; takes robot_ip:=<address> (default 192.168.56.101), camera:=false, rviz:=true, headless_mode:=false, freedrive:=true"
 dir = "{{config_root}}/robot"
 run = "ros2 launch launch.xml robot:=real"
 
@@ -22,7 +22,7 @@ description = "The policy runner; takes --task <task_id>, and --policy <url>, --
 run = "cargo run --release -p policy-runner --"
 
 [tasks.record]
-description = "Record demonstrations to recording/ while the button is held, in freedrive, the throttle driving the gripper; takes --task <task_id>, and `mise run record -- --help` lists the rest"
+description = "Record demonstrations to recording/ while the button is held, the throttle driving the gripper, with the arm in freedrive from real-robot freedrive:=true; takes --task <task_id>, and `mise run record -- --help` lists the rest"
 run = "uv run record.py"
 
 [tasks."python:sync"]

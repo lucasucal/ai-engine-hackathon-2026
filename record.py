@@ -28,16 +28,14 @@ from typing import Any
 
 import numpy as np
 import rclpy
-from controller_manager_msgs.srv import ListControllers, SwitchController
 from PIL import Image, UnidentifiedImageError
-from rclpy.client import Client
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.utilities import remove_ros_args
 from sensor_msgs.msg import CompressedImage, JointState
-from std_msgs.msg import Bool, Float64MultiArray
+from std_msgs.msg import Float64MultiArray
 from ur_msgs.msg import Analog, IOStates
 
 SCHEMA_VERSION = 2
@@ -71,10 +69,6 @@ GRIPPER_HYSTERESIS_STEPS = 2.0
 # How far the fully pressed throttle opens the gripper, in proprio.gripper's units: 1 fully open,
 # 0 closed.
 GRIPPER_MAX_OPENING = 0.7
-FREEDRIVE_CONTROLLER = "freedrive_mode_controller"
-DEFAULT_ARM_CONTROLLER = "joint_trajectory_controller"
-# freedrive_mode_controller ends freedrive after its inactive_timeout, 1 s, without a message.
-FREEDRIVE_KEEPALIVE_S = 0.2
 
 # (d, a, alpha) per joint, and the palm's offset and axes, as crates/policy-runner/src/kinematics.rs
 # has them, so that recorded ee_pos and ee_quat match what the policy is sent.
@@ -200,7 +194,7 @@ class Robot:
         self,
         node: Node,
         pin: int,
-        pressed_state: int | None,
+        pressed_state: int,
         debounce_s: float,
         throttle_pin: int,
         camera_topic: str,
@@ -217,6 +211,7 @@ class Robot:
         self.finger: tuple[float, float] | None = None
         self.io_first_at: float | None = None
         self.io_last_at = 0.0
+        self.pressed_at_start = False
         node.create_subscription(JointState, "/joint_states", self.on_arm, 10)
         node.create_subscription(JointState, "/gripper/joint_states", self.on_finger, 10)
         node.create_subscription(IOStates, "/io_and_status_controller/io_states", self.on_io, 100)
@@ -257,15 +252,8 @@ class Robot:
             return
         if self.io_first_at is None:
             self.io_first_at = now
-            if self.pressed_state is None:
-                self.pressed_state = 1 - state
-                print(
-                    f"Digital input {self.pin} reads {state} at rest, so a press reads "
-                    f"{self.pressed_state}. Hold the button to record an episode."
-                )
-            elif state == self.pressed_state:
-                print(f"Digital input {self.pin} reads {state}, pressed: release it first.")
-            else:
+            self.pressed_at_start = state == self.pressed_state
+            if not self.pressed_at_start:
                 print(f"Digital input {self.pin} reads {state}. Hold the button to record.")
         self.io_last_at = now
         changed_to = self.debouncer.update(state, now)
@@ -442,117 +430,6 @@ def spin(executor: SingleThreadedExecutor) -> None:
         pass
 
 
-class ControllerError(Exception):
-    pass
-
-
-def call[Request, Response](
-    client: Client[Request, Response], request: Request, timeout_s: float = 5.0
-) -> Response:
-    future = client.call_async(request)
-    deadline = time.monotonic() + timeout_s
-    while not future.done():
-        if time.monotonic() > deadline:
-            raise ControllerError(f"{client.srv_name} did not answer within {timeout_s:g} s")
-        time.sleep(0.01)
-    response = future.result()
-    if response is None:
-        raise ControllerError(f"{client.srv_name} gave no answer")
-    return response
-
-
-class Freedrive:
-    """Swaps the controllers commanding the arm's joints for freedrive_mode_controller, and back."""
-
-    def __init__(self, node: Node, controller_manager: str) -> None:
-        self.controller_manager = controller_manager
-        self.lister = node.create_client(ListControllers, f"{controller_manager}/list_controllers")
-        self.switcher = node.create_client(
-            SwitchController, f"{controller_manager}/switch_controller"
-        )
-        self.enable = node.create_publisher(
-            Bool, f"/{FREEDRIVE_CONTROLLER}/enable_freedrive_mode", 10
-        )
-        self.restore: list[str] = []
-        self.engaged = False
-        node.create_timer(FREEDRIVE_KEEPALIVE_S, self.keep_alive)
-
-    def keep_alive(self) -> None:
-        if self.engaged:
-            self.enable.publish(Bool(data=True))
-
-    def connect(self) -> None:
-        for client in (self.lister, self.switcher):
-            if not client.wait_for_service(timeout_sec=5.0):
-                raise ControllerError(f"cannot reach {self.controller_manager}")
-
-    def start(self) -> None:
-        active = [
-            c
-            for c in call(self.lister, ListControllers.Request()).controller
-            if c.state == "active"
-        ]
-        if any(c.name == FREEDRIVE_CONTROLLER for c in active):
-            self.restore = [DEFAULT_ARM_CONTROLLER]
-            print(
-                f"{FREEDRIVE_CONTROLLER} was already active, so {DEFAULT_ARM_CONTROLLER} "
-                "takes over when it ends."
-            )
-        else:
-            self.restore = [
-                c.name
-                for c in active
-                if any(i.split("/")[0] in ARM_JOINTS for i in c.claimed_interfaces)
-            ]
-            self.switch(activate=[FREEDRIVE_CONTROLLER], deactivate=self.restore)
-        self.engaged = True
-        self.keep_alive()
-        print("Freedrive on.")
-
-    def stop(self) -> None:
-        if not self.engaged:
-            return
-        self.engaged = False
-        self.enable.publish(Bool(data=False))
-        self.switch(activate=self.restore, deactivate=[FREEDRIVE_CONTROLLER])
-        print(f"Freedrive off; {self.restored()} active again.")
-
-    def switch(self, activate: list[str], deactivate: list[str]) -> None:
-        request = SwitchController.Request(
-            activate_controllers=activate,
-            deactivate_controllers=deactivate,
-            strictness=SwitchController.Request.STRICT,
-        )
-        request.timeout.sec = 3
-        response = call(self.switcher, request)
-        if not response.ok:
-            detail = f": {response.message}" if response.message else ""
-            raise ControllerError(f"activating {activate} for {deactivate} failed{detail}")
-
-    def restored(self) -> str:
-        return ", ".join(self.restore) or "no controller"
-
-    def manual_stop_command(self) -> str:
-        activate = f" --activate {' '.join(self.restore)}" if self.restore else ""
-        return f"ros2 control switch_controllers --deactivate {FREEDRIVE_CONTROLLER}{activate}"
-
-
-def enter_freedrive(freedrive: Freedrive) -> bool:
-    try:
-        freedrive.start()
-    except ControllerError as error:
-        print(f"Not starting: could not enter freedrive ({error}).")
-        return False
-    return True
-
-
-def leave_freedrive(freedrive: Freedrive) -> None:
-    try:
-        freedrive.stop()
-    except ControllerError as error:
-        print(f"Could not leave freedrive ({error}). Run:\n  {freedrive.manual_stop_command()}")
-
-
 def interrupt(signum: int, frame: FrameType | None) -> None:
     raise KeyboardInterrupt
 
@@ -580,8 +457,8 @@ def main() -> int:
         "--pressed-state",
         type=int,
         choices=(0, 1),
-        help="what the input reads while the button is pressed; "
-        "default the opposite of what it reads when the recorder starts",
+        default=1,
+        help="what the input reads while the button is pressed (default 1)",
     )
     parser.add_argument(
         "--debounce-ms",
@@ -594,16 +471,6 @@ def main() -> int:
         type=Path,
         default=Path(__file__).resolve().parent / "recording",
         help="default recording/ beside this script",
-    )
-    parser.add_argument(
-        "--controller-manager",
-        default="/controller_manager",
-        help="the arm's controller manager (default /controller_manager)",
-    )
-    parser.add_argument(
-        "--no-freedrive",
-        action="store_true",
-        help="leave the controllers alone, for freedrive started and ended by hand",
     )
     parser.add_argument(
         "--throttle-pin", type=int, default=1, help="the throttle's analog input (default 1)"
@@ -647,7 +514,7 @@ def main() -> int:
     if not 0.0 < args.gripper_max_opening <= 1.0:
         parser.error("--gripper-max-opening must be above 0 and at most 1")
 
-    # rclpy's own Ctrl-C handler would shut ROS down before the controllers can be switched back.
+    # Each stop signal raises KeyboardInterrupt, so the loop below ends and saves the episode.
     rclpy.init(args=sys.argv, signal_handler_options=SignalHandlerOptions.NO)
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGHUP, interrupt)
@@ -668,7 +535,6 @@ def main() -> int:
         args.gripper_max_opening,
         args.gripper_hysteresis_steps * GRIPPER_STEP_RAD,
     )
-    freedrive = None if args.no_freedrive else Freedrive(node, args.controller_manager)
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     spinner = threading.Thread(target=spin, args=(executor,), daemon=True)
@@ -679,8 +545,6 @@ def main() -> int:
     next_step_at = 0.0
     stop_reason = "Ctrl-C"
     try:
-        if freedrive is not None:
-            freedrive.connect()
         print(
             f"Waiting for the button on digital input {args.pin}; the throttle drives the gripper "
             "only while it is held. Ctrl-C to quit."
@@ -697,6 +561,16 @@ def main() -> int:
             elif now - robot.io_last_at > 2.0:
                 stop_reason = "io_states stopped for 2 s"
                 break
+            # Otherwise every release would start an episode and every press end one.
+            if robot.pressed_at_start:
+                other = 1 - args.pressed_state
+                stop_reason = (
+                    f"digital input {args.pin} reads {args.pressed_state}, which counts as the "
+                    "button being pressed. If it is not pressed, the button reads "
+                    f"{other} when pressed: run again with --pressed-state {other}. "
+                    "Otherwise release it and run again"
+                )
+                break
 
             while not robot.button_pressed.empty():
                 pressed = robot.button_pressed.get_nowait()
@@ -705,18 +579,12 @@ def main() -> int:
                     if episode is not None:
                         saved.append(finish(episode, args.out_dir, "release"))
                         episode = None
-                    if freedrive is not None:
-                        leave_freedrive(freedrive)
                 elif episode is not None:
                     continue
                 elif robot.fresh_arm(now) is None:
                     print("Not starting: no fresh /joint_states.")
-                elif freedrive is not None and not enter_freedrive(freedrive):
-                    continue
                 else:
                     throttle.enabled = True
-                    # Switching into freedrive takes a moment; the episode starts once it is on.
-                    now = time.monotonic()
                     episode = Episode(args.task, now)
                     next_step_at = now
                     missing = []
@@ -738,18 +606,14 @@ def main() -> int:
             time.sleep(0.002 if episode is not None else 0.01)
     except KeyboardInterrupt:
         pass
-    except ControllerError as error:
-        stop_reason = f"freedrive unavailable, {error}"
     finally:
         # A second Ctrl-C, or a closing terminal's signal arriving twice, must not cut short saving
-        # the episode and leaving freedrive.
+        # the episode.
         for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(signum, signal.SIG_IGN)
         throttle.enabled = False
         if episode is not None:
             saved.append(finish(episode, args.out_dir, stop_reason))
-        if freedrive is not None:
-            leave_freedrive(freedrive)
         rclpy.try_shutdown()
         spinner.join(timeout=2.0)
 

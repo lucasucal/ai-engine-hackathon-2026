@@ -62,5 +62,9 @@ also starts the Gemini 336 unless given `camera:=false`.
 ### Collecting data
 
 ```bash
+mise run real-robot freedrive:=true
 mise run record -- --task <task_id>
 ```
+
+Press down the red button to start the recording. While the button is
+held, the throttle drives the gripper. Turn the throttle to open the gripper. When releasing the button, it saves the episode to `recording/<task_id>/<episode_id>.json`. 

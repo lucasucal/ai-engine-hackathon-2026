@@ -10,7 +10,7 @@
   <arg name="headless_mode" default="true"
        description="Send the driver's program on connect, which needs the robot in Remote Control mode; false to play External Control on the pendant in Local mode"/>
   <arg name="freedrive" default="false"
-       description="Keep the arm in freedrive the whole time, to guide it by hand while recording; joint_trajectory_controller then stays inactive, so nothing can command the arm"/>
+       description="deactive the joint_trajectory_controller, and activate the freedrive_mode_controller"/>
   <let name="joint_controller"
        value="$(eval '\'freedrive_mode_controller\' if \'$(var freedrive)\'.lower() == \'true\' else \'joint_trajectory_controller\'')"/>
   <!-- Here, as below the includes $(dirname) would be the last included file's. -->

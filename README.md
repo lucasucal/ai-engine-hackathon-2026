@@ -66,5 +66,4 @@ mise run real-robot freedrive:=true
 mise run record -- --task <task_id>
 ```
 
-Press down the red button to start the recording. While the button is
-held, the throttle drives the gripper. Turn the throttle to open the gripper. When releasing the button, it saves the episode to `recording/<task_id>/<episode_id>.json`. 
+The thumb throttle, which includes a throttle and a self-holding red button at the wrist, enables the start and the stop of the recording and the gripper position control. When the button is pressed down after running the command, it starts the recording. Turn the throttle to control the angle to which the gripper opens. When the button is pressed again and goes to the top position, the recording is saved to `recording/<task_id>/<episode_id>.json` and the gripper control is disabled.

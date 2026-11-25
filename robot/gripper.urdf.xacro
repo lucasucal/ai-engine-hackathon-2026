@@ -7,8 +7,10 @@
   <xacro:include filename="$(find robotiq_description)/urdf/robotiq_2f_140_macro.urdf.xacro"/>
 
   <link name="tool0"/>
+  <!-- 25 N, as robotiq_driver multiplies the force multiplier by 235 N, not gripper_max_force. -->
   <xacro:robotiq_gripper name="RobotiqGripperHardwareInterface" prefix="" parent="tool0"
-                         use_fake_hardware="$(arg use_fake_hardware)" com_port="$(arg com_port)">
+                         use_fake_hardware="$(arg use_fake_hardware)" com_port="$(arg com_port)"
+                         gripper_speed_multiplier="0.5" gripper_force_multiplier="${25.0 / 235.0}">
     <!-- Assumes the standard flange mount; confirm with the organisers. -->
     <origin xyz="0 0 0" rpy="0 0 0"/>
   </xacro:robotiq_gripper>

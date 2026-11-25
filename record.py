@@ -42,6 +42,9 @@ SCHEMA_VERSION = 2
 STEP_S = 0.05
 STALE_AFTER_S = 0.1
 STARTUP_TIMEOUT_S = 10.0
+# The button latches, so one left down would otherwise record without end.
+EPISODE_LIMIT_S = 300
+EPISODE_WARNING_S = 290
 CAMERA_TOPIC = "/camera/color/image_raw/compressed"
 IMAGE_SIZE = (640, 480)
 ARM_JOINTS = (
@@ -513,6 +516,17 @@ def main() -> int:
                 steps = len(episode.steps)
                 if steps % 20 == 0:
                     print(f"  step {steps} ({steps * STEP_S:.0f} s)", flush=True)
+                if steps == round(EPISODE_WARNING_S / STEP_S):
+                    print(
+                        f"  {EPISODE_LIMIT_S - EPISODE_WARNING_S} s left before the episode stops "
+                        "and saves.",
+                        flush=True,
+                    )
+                if steps >= round(EPISODE_LIMIT_S / STEP_S):
+                    throttle.enabled = False
+                    saved.append(finish(episode, args.out_dir, f"{EPISODE_LIMIT_S} s limit"))
+                    episode = None
+                    print("Press the button to release it, then again to record the next episode.")
             time.sleep(0.002 if episode is not None else 0.01)
     except KeyboardInterrupt:
         pass

@@ -55,6 +55,10 @@ ARM_JOINTS = (
 FINGER_JOINT = "finger_joint"
 FINGER_CLOSED = 0.695
 FINGER_COMMAND_TOPIC = "/gripper/finger_position_controller/commands"
+BUTTON_PIN = 0
+BUTTON_PRESSED_STATE = 1
+BUTTON_DEBOUNCE_S = 0.02
+THROTTLE_PIN = 1
 # The gripper's driver passes a new target on only every 15-20 ms, so faster gains nothing.
 GRIPPER_COMMAND_S = 0.02
 # throttle_cal measured 0.84 V released and 4.35 V pressed fully; these ends sit just inside, so
@@ -69,6 +73,7 @@ GRIPPER_HYSTERESIS_STEPS = 2.0
 # How far the fully pressed throttle opens the gripper, in proprio.gripper's units: 1 fully open,
 # 0 closed.
 GRIPPER_MAX_OPENING = 0.7
+FINGER_MOST_OPEN = (1.0 - GRIPPER_MAX_OPENING) * FINGER_CLOSED
 
 # (d, a, alpha) per joint, and the palm's offset and axes, as crates/policy-runner/src/kinematics.rs
 # has them, so that recorded ee_pos and ee_quat match what the policy is sent.
@@ -190,22 +195,10 @@ def frame_problem(jpeg: bytes) -> str | None:
 
 
 class Robot:
-    def __init__(
-        self,
-        node: Node,
-        pin: int,
-        pressed_state: int,
-        debounce_s: float,
-        throttle_pin: int,
-        camera_topic: str,
-    ) -> None:
-        self.pin = pin
-        self.pressed_state = pressed_state
-        self.debouncer = Debouncer(debounce_s)
+    def __init__(self, node: Node) -> None:
+        self.debouncer = Debouncer(BUTTON_DEBOUNCE_S)
         self.button_pressed: queue.Queue[bool] = queue.Queue()
-        self.throttle_pin = throttle_pin
         self.throttle: AnalogReading | None = None
-        self.camera_topic = camera_topic
         self.camera: CameraFrame | None = None
         self.arm: ArmState | None = None
         self.finger: tuple[float, float] | None = None
@@ -216,7 +209,7 @@ class Robot:
         node.create_subscription(JointState, "/gripper/joint_states", self.on_finger, 10)
         node.create_subscription(IOStates, "/io_and_status_controller/io_states", self.on_io, 100)
         node.create_subscription(
-            CompressedImage, camera_topic, self.on_camera, qos_profile_sensor_data
+            CompressedImage, CAMERA_TOPIC, self.on_camera, qos_profile_sensor_data
         )
 
     def on_camera(self, msg: CompressedImage) -> None:
@@ -224,7 +217,7 @@ class Robot:
         problem = frame_problem(jpeg)
         previous = self.camera
         if problem is not None and (previous is None or previous.problem != problem):
-            print(f"Camera frames on {self.camera_topic} are {problem}: images.top stays null.")
+            print(f"Camera frames on {CAMERA_TOPIC} are {problem}: images.top stays null.")
         self.camera = CameraFrame(time.monotonic(), jpeg, problem)
 
     def on_arm(self, msg: JointState) -> None:
@@ -244,21 +237,21 @@ class Robot:
 
     def on_io(self, msg: IOStates) -> None:
         now = time.monotonic()
-        throttle = next((a for a in msg.analog_in_states if a.pin == self.throttle_pin), None)
+        throttle = next((a for a in msg.analog_in_states if a.pin == THROTTLE_PIN), None)
         if throttle is not None:
             self.throttle = AnalogReading(now, throttle.domain, throttle.state)
-        state = next((int(d.state) for d in msg.digital_in_states if d.pin == self.pin), None)
+        state = next((int(d.state) for d in msg.digital_in_states if d.pin == BUTTON_PIN), None)
         if state is None:
             return
         if self.io_first_at is None:
             self.io_first_at = now
-            self.pressed_at_start = state == self.pressed_state
+            self.pressed_at_start = state == BUTTON_PRESSED_STATE
             if not self.pressed_at_start:
-                print(f"Digital input {self.pin} reads {state}. Hold the button to record.")
+                print(f"Digital input {BUTTON_PIN} reads {state}. Hold the button to record.")
         self.io_last_at = now
         changed_to = self.debouncer.update(state, now)
         if changed_to is not None:
-            self.button_pressed.put(changed_to == self.pressed_state)
+            self.button_pressed.put(changed_to == BUTTON_PRESSED_STATE)
 
     def fresh_arm(self, now: float) -> ArmState | None:
         arm = self.arm
@@ -277,17 +270,13 @@ class Robot:
         return base64.b64encode(frame.jpeg).decode("ascii")
 
 
-def opening_to_angle(opening: float) -> float:
-    return (1.0 - opening) * FINGER_CLOSED
-
-
-def finger_angle(volts: float, released_v: float, pressed_v: float, open_angle: float) -> float:
-    pressed = (volts - released_v) / (pressed_v - released_v)
+def finger_angle(volts: float) -> float:
+    pressed = (volts - THROTTLE_RELEASED_V) / (THROTTLE_PRESSED_V - THROTTLE_RELEASED_V)
     if pressed <= 0.0:
         return FINGER_CLOSED
     if pressed >= 1.0:
-        return open_angle
-    return FINGER_CLOSED - pressed * (FINGER_CLOSED - open_angle)
+        return FINGER_MOST_OPEN
+    return FINGER_CLOSED - pressed * (FINGER_CLOSED - FINGER_MOST_OPEN)
 
 
 class Hysteresis:
@@ -309,19 +298,11 @@ class Throttle:
     """Commands the gripper from the throttle's voltage while enabled: released closes it, pressed
     opens it."""
 
-    def __init__(
-        self,
-        node: Node,
-        robot: Robot,
-        released_v: float,
-        pressed_v: float,
-        max_opening: float,
-        hysteresis_rad: float,
-    ) -> None:
+    def __init__(self, node: Node, robot: Robot) -> None:
         self.robot = robot
-        self.released_v, self.pressed_v = released_v, pressed_v
-        self.open_angle = opening_to_angle(max_opening)
-        self.command = Hysteresis(hysteresis_rad, self.open_angle, FINGER_CLOSED)
+        self.command = Hysteresis(
+            GRIPPER_HYSTERESIS_STEPS * GRIPPER_STEP_RAD, FINGER_MOST_OPEN, FINGER_CLOSED
+        )
         self.publisher = node.create_publisher(Float64MultiArray, FINGER_COMMAND_TOPIC, 10)
         self.angle: float | None = None
         self.fault: str | None = "no fresh reading"
@@ -332,16 +313,14 @@ class Throttle:
         reading = self.robot.throttle
         fault = self.check(reading, time.monotonic())
         if fault != self.fault:
-            pin = self.robot.throttle_pin
             print(
-                f"Throttle on analog input {pin}: {fault}, so the gripper holds."
+                f"Throttle on analog input {THROTTLE_PIN}: {fault}, so the gripper holds."
                 if fault
-                else f"Throttle on analog input {pin} reads normally."
+                else f"Throttle on analog input {THROTTLE_PIN} reads normally."
             )
             self.fault = fault
         if self.enabled and fault is None and reading is not None:
-            target = finger_angle(reading.value, self.released_v, self.pressed_v, self.open_angle)
-            self.angle = self.command.update(target)
+            self.angle = self.command.update(finger_angle(reading.value))
             self.publisher.publish(Float64MultiArray(data=[self.angle]))
 
     def check(self, reading: AnalogReading | None, now: float) -> str | None:
@@ -452,89 +431,21 @@ def main() -> int:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--task", required=True, help='e.g. bench_lift_can_v0, or "hidden"')
-    parser.add_argument("--pin", type=int, default=0, help="the button's digital input (default 0)")
-    parser.add_argument(
-        "--pressed-state",
-        type=int,
-        choices=(0, 1),
-        default=1,
-        help="what the input reads while the button is pressed (default 1)",
-    )
-    parser.add_argument(
-        "--debounce-ms",
-        type=float,
-        default=20.0,
-        help="a press or release counts once the input has held it this long (default 20)",
-    )
     parser.add_argument(
         "--out-dir",
         type=Path,
         default=Path(__file__).resolve().parent / "recording",
         help="default recording/ beside this script",
     )
-    parser.add_argument(
-        "--throttle-pin", type=int, default=1, help="the throttle's analog input (default 1)"
-    )
-    parser.add_argument(
-        "--camera",
-        default=CAMERA_TOPIC,
-        help=f"the camera's JPEG topic for images.top (default {CAMERA_TOPIC})",
-    )
-    parser.add_argument(
-        "--throttle-released-v",
-        type=float,
-        default=THROTTLE_RELEASED_V,
-        help=f"at or below this the gripper is closed (default {THROTTLE_RELEASED_V} V)",
-    )
-    parser.add_argument(
-        "--throttle-pressed-v",
-        type=float,
-        default=THROTTLE_PRESSED_V,
-        help="at or above this the gripper is open as far as --gripper-max-opening "
-        f"(default {THROTTLE_PRESSED_V} V)",
-    )
-    parser.add_argument(
-        "--gripper-hysteresis-steps",
-        type=float,
-        default=GRIPPER_HYSTERESIS_STEPS,
-        help="the gripper command changes only when the throttle asks for this many of the "
-        "gripper's 227 position steps away; 0 turns it off "
-        f"(default {GRIPPER_HYSTERESIS_STEPS:g}, about 0.6 mm at the fingertips each)",
-    )
-    parser.add_argument(
-        "--gripper-max-opening",
-        type=float,
-        default=GRIPPER_MAX_OPENING,
-        help="how far the fully pressed throttle opens the gripper: "
-        f"1 fully open, 0 closed (default {GRIPPER_MAX_OPENING:g})",
-    )
     args = parser.parse_args(remove_ros_args(sys.argv)[1:])
-    if args.throttle_released_v >= args.throttle_pressed_v:
-        parser.error("--throttle-released-v must be below --throttle-pressed-v")
-    if not 0.0 < args.gripper_max_opening <= 1.0:
-        parser.error("--gripper-max-opening must be above 0 and at most 1")
 
     # Each stop signal raises KeyboardInterrupt, so the loop below ends and saves the episode.
     rclpy.init(args=sys.argv, signal_handler_options=SignalHandlerOptions.NO)
     signal.signal(signal.SIGTERM, interrupt)
     signal.signal(signal.SIGHUP, interrupt)
     node = rclpy.create_node("demo_recorder")
-    robot = Robot(
-        node,
-        args.pin,
-        args.pressed_state,
-        args.debounce_ms / 1000,
-        args.throttle_pin,
-        args.camera,
-    )
-    throttle = Throttle(
-        node,
-        robot,
-        args.throttle_released_v,
-        args.throttle_pressed_v,
-        args.gripper_max_opening,
-        args.gripper_hysteresis_steps * GRIPPER_STEP_RAD,
-    )
+    robot = Robot(node)
+    throttle = Throttle(node, robot)
     executor = SingleThreadedExecutor()
     executor.add_node(node)
     spinner = threading.Thread(target=spin, args=(executor,), daemon=True)
@@ -546,7 +457,7 @@ def main() -> int:
     stop_reason = "Ctrl-C"
     try:
         print(
-            f"Waiting for the button on digital input {args.pin}; the throttle drives the gripper "
+            f"Waiting for the button on digital input {BUTTON_PIN}; the throttle drives the gripper "
             "only while it is held. Ctrl-C to quit."
         )
         started_waiting = time.monotonic()
@@ -563,12 +474,11 @@ def main() -> int:
                 break
             # Otherwise every release would start an episode and every press end one.
             if robot.pressed_at_start:
-                other = 1 - args.pressed_state
                 stop_reason = (
-                    f"digital input {args.pin} reads {args.pressed_state}, which counts as the "
-                    "button being pressed. If it is not pressed, the button reads "
-                    f"{other} when pressed: run again with --pressed-state {other}. "
-                    "Otherwise release it and run again"
+                    f"digital input {BUTTON_PIN} reads {BUTTON_PRESSED_STATE}, which counts as the "
+                    "button being pressed. Release it and run again. If it is not pressed, its "
+                    "wiring has changed: set BUTTON_PRESSED_STATE in record.py to "
+                    f"{1 - BUTTON_PRESSED_STATE}"
                 )
                 break
 
@@ -591,7 +501,7 @@ def main() -> int:
                     if robot.fresh_gripper_opening(now) is None:
                         missing.append("no fresh /gripper/joint_states, gripper is null")
                     if robot.fresh_image(now) is None:
-                        missing.append(f"no fresh frame on {args.camera}, images.top is null")
+                        missing.append(f"no fresh frame on {CAMERA_TOPIC}, images.top is null")
                     notes = "".join(f"; {note}" for note in missing)
                     print(f"Recording {episode.episode_id}. Release to stop{notes}.")
 

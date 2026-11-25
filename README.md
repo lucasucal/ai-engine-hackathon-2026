@@ -53,3 +53,9 @@ mise run policy-runner -- --task <task_id> --policy <url> --camera /camera/color
 By default `real-robot` sends the driver's program on connect, which needs the arm in Remote Control
 mode; with `headless_mode:=false`, play External Control on the pendant in Local mode instead. It
 also starts the Gemini 336 unless given `camera:=false`.
+
+### Collecting data
+
+```bash
+mise run record -- --task <task_id>
+```

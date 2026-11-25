@@ -1,23 +1,33 @@
 [env]
-_.python.venv = { path = ".venv", create = true, uv_create_args = ["--python", "/usr/bin/python3"] }
+_.python.venv = { path = ".venv", create = true, uv_create_args = ["--python", "/usr/bin/python3", "--system-site-packages"] }
 
 [tasks.mock-robot]
-description = "UR12e and 2F-140 on mock hardware; takes camera:=true to add the Gemini 336, rviz:=true"
+description = "UR12e and 2F-140 on mock hardware; takes camera:=true to add the Gemini 336, rviz:=true, hand_guiding:=false"
+depends = ["build-hand-guiding"]
 dir = "{{config_root}}/robot"
 run = "ros2 launch launch.xml robot:=mock"
 
 [tasks.real-robot]
-description = "UR12e, 2F-140 and Gemini 336; takes robot_ip:=<address> (default 192.168.56.101), camera:=false, rviz:=true, headless_mode:=false"
+description = "UR12e, 2F-140 and Gemini 336; takes robot_ip:=<address> (default 192.168.56.101), camera:=false, rviz:=true, headless_mode:=false, hand_guiding:=false"
+depends = ["build-hand-guiding"]
 dir = "{{config_root}}/robot"
 run = "ros2 launch launch.xml robot:=real"
 
+[tasks.build-hand-guiding]
+description = "Build hand-guiding, which mock-robot and real-robot start"
+run = "cargo build --release -p hand-guiding"
+
 [tasks.test-policy]
-description = "A stand-in policy on port 8000; `mise run test-policy -- --help` lists late, chunked and invalid replies"
+description = "A stand-in policy on port 8000; `mise run test-policy -- --help` lists replays and late, chunked and invalid replies"
 run = "python3 test-policy.py"
 
 [tasks.policy-runner]
 description = "The policy runner; takes --task <task_id>, and --policy <url>, --camera <topic>"
 run = "cargo run --release -p policy-runner --"
+
+[tasks.record]
+description = "Record demonstrations to recording/ while the hand-guiding button is held; takes --task <task_id>, and `mise run record -- --help` lists the rest"
+run = "cargo run --release -p record --"
 
 [tasks."python:sync"]
 description = "Install the Python dev tools into .venv"
@@ -27,3 +37,16 @@ run = "uv sync --locked"
 description = "Format, lint and type-check the Python code"
 depends = ["python:sync"]
 run = ["ruff format", "ruff check", "basedpyright"]
+
+[tasks.extract-video]
+description = "Turn recorded episodes' camera frames into MP4s next to them; takes a json file captures with the `mise run record`"
+usage = 'arg "<episode>" var=#true help="An episode saved by `mise run record`"'
+dir = "{{cwd}}"
+run = '''
+for episode in $usage_episode; do
+  jq -r '.steps[].images.top' "$episode" | while read -r frame; do printf %s "$frame" | base64 -d; done \
+    | ffmpeg -loglevel error -y -f image2pipe -framerate "1/$(jq .step_s "$episode")" -c:v mjpeg -i - \
+      -c:v libx264 -pix_fmt yuv420p "${episode%.json}.mp4"
+  echo "${episode%.json}.mp4"
+done
+'''

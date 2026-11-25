@@ -1,9 +1,10 @@
 use crate::{
     app::{App, Phase, Robot},
-    episode::{BUDGET, MAX_TRACKING_ERROR, Progress, STEP, STEPS},
+    episode::{BUDGET, MAX_TRACKING_ERROR, Progress, STEPS},
     gripper::GripperHardware,
     policy::{ACT_TIMEOUT, Health, Readiness},
 };
+use policy_contract::STEP;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
@@ -465,7 +466,7 @@ mod tests {
         });
         let screen = screen(&shared, None, LIVE);
         assert!(shows(&screen, "running an episode"), "{screen:#?}");
-        assert!(shows(&screen, "120 / 300"), "{screen:#?}");
+        assert!(shows(&screen, "120 / 900"), "{screen:#?}");
         assert!(shows(&screen, "Late      3    Retries 1"), "{screen:#?}");
         assert!(shows(&screen, "last 80 ms"), "{screen:#?}");
 

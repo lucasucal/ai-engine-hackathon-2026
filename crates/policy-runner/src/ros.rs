@@ -25,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub const CAMERA_TOPIC: &str = "/camera/color/image_raw/compressed";
 const SPEED_SCALING_TOPIC: &str = "/speed_scaling_state_broadcaster/speed_scaling";
 const GRIPPER_DESCRIPTION_TOPIC: &str = "/gripper/robot_description";
 const TRAJECTORY_TOPIC: &str = "/joint_trajectory_controller/joint_trajectory";
@@ -64,6 +65,13 @@ pub struct Ros {
     _executor_thread: JoinHandle<()>,
 }
 
+/// Where the images sent to the policy come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraSource {
+    RosTopic,
+    BlackImage,
+}
+
 enum Camera {
     Black { base64: String },
     Topic(Latest<Vec<u8>>),
@@ -78,7 +86,7 @@ struct Subscriptions {
 }
 
 impl Ros {
-    pub fn new(camera_topic: Option<&str>, log: Arc<Log>) -> Result<Self> {
+    pub fn new(source: CameraSource, log: Arc<Log>) -> Result<Self> {
         let context = Context::default_from_env()?;
         let mut executor = context.create_basic_executor();
         let node = executor.create_node("policy_runner")?;
@@ -123,22 +131,21 @@ impl Ros {
                 }
             })?;
 
-        let (camera, camera_subscription) = match camera_topic {
-            None => (
-                Camera::Black {
-                    base64: BASE64.encode(BLACK_JPEG),
-                },
-                None,
-            ),
-            Some(topic) => {
+        let (camera, camera_subscription) = match source {
+            CameraSource::RosTopic => {
                 let frame = Latest::default();
-                // The camera driver publishes best-effort, which a reliable subscription
-                // wouldn't match.
-                let subscription = node.create_subscription(topic.best_effort().keep_last(1), {
-                    let frame = Arc::clone(&frame);
-                    move |msg: CompressedImage| store(&frame, msg.data)
-                })?;
+                // The camera driver publishes best-effort, which a reliable subscription wouldn't
+                // match.
+                let subscription =
+                    node.create_subscription(CAMERA_TOPIC.best_effort().keep_last(1), {
+                        let frame = Arc::clone(&frame);
+                        move |msg: CompressedImage| store(&frame, msg.data)
+                    })?;
                 (Camera::Topic(frame), Some(subscription))
+            }
+            CameraSource::BlackImage => {
+                let base64 = BASE64.encode(BLACK_JPEG);
+                (Camera::Black { base64 }, None)
             }
         };
 

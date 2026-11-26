@@ -43,21 +43,23 @@ mise run test-policy
 mise run policy-runner -- --task <task_id>
 ```
 
-`mock-robot` brings up the UR12e and the gripper on mock hardware. `test-policy` serves a stand-in
-policy on port 8000; `mise run test-policy -- --help` lists the replies it can send, including late,
-chunked and invalid ones.
+`mock-robot` brings up the UR12e and the gripper on mock hardware, and the real Gemini 336 unless
+given `camera:=false`. `test-policy` serves a stand-in policy on port 8000; `mise run test-policy --
+--help` lists the replies it can send, including late, chunked and invalid ones.
 
 `mise run test-policy -- --replay recording/<task_id>/<episode_id>.json` plays back a recorded
 episode's motion and gripper instead, relative to wherever the arm starts.
 
-Thepolicy runner is a terminal UI that runs episodes of the policy against the arm; it sends a black
-frame unless given `--camera <topic>`.
+The policy runner is a terminal UI that runs episodes of the policy against the arm. It sends the
+camera's frames from `/camera/color/image_raw/compressed`, or a black frame if given `--no-camera`.
+An episode fails as soon as the camera's frame is missing or stale, so without a camera plugged in,
+pass `--no-camera`.
 
 ### On the real robot
 
 ```bash
 mise run real-robot robot_ip:=<address>
-mise run policy-runner -- --task <task_id> --policy <url> --camera /camera/color/image_raw/compressed
+mise run policy-runner -- --task <task_id> --policy <url>
 ```
 
 By default `real-robot` sends the driver's program on connect, which needs the arm in Remote Control

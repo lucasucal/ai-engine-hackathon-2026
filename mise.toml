@@ -2,7 +2,7 @@
 _.python.venv = { path = ".venv", create = true, uv_create_args = ["--python", "/usr/bin/python3", "--system-site-packages"] }
 
 [tasks.mock-robot]
-description = "UR12e and 2F-140 on mock hardware; takes camera:=true to add the Gemini 336, rviz:=true, hand_guiding:=false"
+description = "UR12e and 2F-140 on mock hardware, and the Gemini 336; takes camera:=false, rviz:=true, hand_guiding:=false"
 depends = ["build-hand-guiding"]
 dir = "{{config_root}}/robot"
 run = "ros2 launch launch.xml robot:=mock"
@@ -22,7 +22,7 @@ description = "A stand-in policy on port 8000; `mise run test-policy -- --help` 
 run = "python3 test-policy.py"
 
 [tasks.policy-runner]
-description = "The policy runner; takes --task <task_id>, and --policy <url>, --camera <topic>"
+description = "The policy runner; takes --task <task_id>, and --policy <url>, --no-camera"
 run = "cargo run --release -p policy-runner --"
 
 [tasks.record]

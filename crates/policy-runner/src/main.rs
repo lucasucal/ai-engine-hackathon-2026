@@ -16,7 +16,7 @@ use ratatui::{
     DefaultTerminal,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
 };
-use ros::Ros;
+use ros::{CameraSource, Ros};
 use std::{
     io::{self, IsTerminal},
     sync::{
@@ -44,9 +44,9 @@ struct Args {
     /// The `task_id` sent to the policy; `t` changes it between episodes.
     #[arg(long)]
     task: String,
-    /// A `sensor_msgs/CompressedImage` topic of 640×480 JPEGs; without it, a black frame is sent.
+    /// Send a black frame instead of the camera's.
     #[arg(long)]
-    camera: Option<String>,
+    no_camera: bool,
 }
 
 fn main() -> Result<()> {
@@ -60,7 +60,12 @@ fn main() -> Result<()> {
     let log = Arc::new(Log::new());
     let policy = Policy::new(&args.policy);
     let monitored_policy = Policy::new(&args.policy);
-    let ros = Ros::new(args.camera.as_deref(), Arc::clone(&log))?;
+    let camera = if args.no_camera {
+        CameraSource::BlackImage
+    } else {
+        CameraSource::RosTopic
+    };
+    let ros = Ros::new(camera, Arc::clone(&log))?;
     let shared = Shared::new(log);
 
     // After color-eyre's panic hook, so the terminal is restored before a panic is printed.
@@ -77,7 +82,7 @@ fn main() -> Result<()> {
             &shared,
             commands,
             args.policy.clone(),
-            args.camera.clone(),
+            camera,
             args.task.clone(),
         );
         let stop = StopOnDrop(&shared);

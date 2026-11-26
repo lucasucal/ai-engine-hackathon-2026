@@ -3,6 +3,7 @@ use crate::{
     episode::{BUDGET, MAX_TRACKING_ERROR, Progress, STEPS},
     gripper::GripperHardware,
     policy::{ACT_TIMEOUT, Health, Readiness},
+    ros::{CAMERA_TOPIC, CameraSource},
 };
 use policy_contract::STEP;
 use ratatui::{
@@ -47,10 +48,10 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App<'_>, phase: Phase) {
     if phase == Phase::Running {
         policy.push(Span::raw("    polling paused during the episode"));
     }
-    let camera = app
-        .camera_topic
-        .as_deref()
-        .map_or_else(|| "none, a black frame is sent".to_owned(), str::to_owned);
+    let camera = match app.camera {
+        CameraSource::RosTopic => CAMERA_TOPIC,
+        CameraSource::BlackImage => "none, a black frame is sent",
+    };
     let connection = Line::from(format!("Task    {}    Camera  {camera}", app.task_id));
     frame.render_widget(
         Paragraph::new(vec![Line::from(policy), connection])
@@ -341,13 +342,13 @@ mod tests {
         gripper_hardware: None,
     };
 
-    fn screen(shared: &Shared, camera: Option<&str>, robot: Robot) -> Vec<String> {
+    fn screen(shared: &Shared, camera: CameraSource, robot: Robot) -> Vec<String> {
         let (commands, _received) = mpsc::channel();
         let app = App::new(
             shared,
             commands,
             "http://127.0.0.1:8000".to_owned(),
-            camera.map(str::to_owned),
+            camera,
             "bench_lift_can_v0".to_owned(),
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -370,7 +371,7 @@ mod tests {
 
     #[test]
     fn connection() {
-        let screen = screen(&shared(), None, LIVE);
+        let screen = screen(&shared(), CameraSource::BlackImage, LIVE);
         assert!(shows(&screen, "http://127.0.0.1:8000"), "{screen:#?}");
         assert!(shows(&screen, "bench_lift_can_v0"), "{screen:#?}");
         assert!(shows(&screen, "none, a black frame is sent"), "{screen:#?}");
@@ -393,7 +394,7 @@ mod tests {
     fn policy_status(health: Health, readiness: Readiness) -> String {
         let shared = shared();
         *shared.policy.lock() = Some(PolicyStatus { health, readiness });
-        let screen = screen(&shared, None, LIVE);
+        let screen = screen(&shared, CameraSource::BlackImage, LIVE);
         let header = screen[1].trim_matches([' ', '│']);
         header
             .trim_start_matches("Policy  http://127.0.0.1:8000    ")
@@ -419,7 +420,7 @@ mod tests {
             camera_live: Some(true),
             ..LIVE
         };
-        let screen = screen(&shared(), Some("/camera"), robot);
+        let screen = screen(&shared(), CameraSource::RosTopic, robot);
         assert!(shows(&screen, "Arm         ● stale"), "{screen:#?}");
         assert!(shows(&screen, "Gripper     ● live"), "{screen:#?}");
         assert!(shows(&screen, "Camera      ● live"), "{screen:#?}");
@@ -439,7 +440,7 @@ mod tests {
             gripper_hardware,
             ..LIVE
         };
-        let screen = screen(&shared(), None, robot);
+        let screen = screen(&shared(), CameraSource::BlackImage, robot);
         ["Arm speed", "Grip speed", "Grip force"].map(|name| {
             screen
                 .iter()
@@ -466,9 +467,9 @@ mod tests {
             latencies: vec![Duration::from_millis(23), Duration::from_millis(80)],
             tracking_error: 0.04,
         });
-        let screen = screen(&shared, None, LIVE);
+        let screen = screen(&shared, CameraSource::BlackImage, LIVE);
         assert!(shows(&screen, "running an episode"), "{screen:#?}");
-        assert!(shows(&screen, "120 / 900"), "{screen:#?}");
+        assert!(shows(&screen, &format!("120 / {STEPS}")), "{screen:#?}");
         assert!(shows(&screen, "Late      3    Retries 1"), "{screen:#?}");
         assert!(shows(&screen, "last 80 ms"), "{screen:#?}");
 

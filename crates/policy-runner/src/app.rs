@@ -3,7 +3,7 @@ use crate::{
     gripper::GripperHardware,
     log::Log,
     policy::{PolicyStatus, Readiness},
-    ros::{Received, Ros},
+    ros::{CameraSource, Received, Ros},
     worker::distance_to_start,
 };
 use parking_lot::Mutex;
@@ -153,7 +153,7 @@ pub struct App<'a> {
     pub shared: &'a Shared,
     commands: Sender<Command>,
     pub policy_url: String,
-    pub camera_topic: Option<String>,
+    pub camera: CameraSource,
     pub task_id: String,
     /// The new task being typed.
     pub editing: Option<String>,
@@ -165,14 +165,14 @@ impl<'a> App<'a> {
         shared: &'a Shared,
         commands: Sender<Command>,
         policy_url: String,
-        camera_topic: Option<String>,
+        camera: CameraSource,
         task_id: String,
     ) -> Self {
         Self {
             shared,
             commands,
             policy_url,
-            camera_topic,
+            camera,
             task_id,
             editing: None,
             quit: false,
@@ -337,7 +337,13 @@ mod tests {
 
     fn app(shared: &Shared) -> (App<'_>, Receiver<Command>) {
         let (commands, received) = mpsc::channel();
-        let app = App::new(shared, commands, "url".to_owned(), None, "task".to_owned());
+        let app = App::new(
+            shared,
+            commands,
+            "url".to_owned(),
+            CameraSource::BlackImage,
+            "task".to_owned(),
+        );
         (app, received)
     }
 

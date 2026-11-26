@@ -5,7 +5,7 @@
   <!-- Lowercase, not Python's True: ur_control.launch.py compares use_mock_hardware to "true". -->
   <let name="mock" value="$(eval '\'true\' if \'$(var robot)\' == \'mock\' else \'false\'')"/>
   <let name="real" value="$(eval '\'true\' if \'$(var robot)\' == \'real\' else \'false\'')"/>
-  <arg name="camera" default="$(var real)" description="Start the Gemini 336; by default only on real hardware"/>
+  <arg name="camera" default="true" description="Start the Gemini 336"/>
   <arg name="rviz" default="false" description="Start RViz showing the arm and gripper"/>
   <arg name="headless_mode" default="true"
        description="Send the driver's program on connect, which needs the robot in Remote Control mode; false to play External Control on the pendant in Local mode"/>

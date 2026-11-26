@@ -15,4 +15,6 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+approx.workspace = true
+roxmltree.workspace = true
 test-case.workspace = true

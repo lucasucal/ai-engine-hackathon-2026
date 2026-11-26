@@ -1940,8 +1940,10 @@ dependencies = [
 name = "policy-contract"
 version = "0.1.0"
 dependencies = [
+ "approx",
  "imagesize",
  "nalgebra",
+ "roxmltree",
  "serde",
  "serde_json",
  "test-case",

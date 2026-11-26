@@ -80,7 +80,14 @@ UR12E_DH = [
     (0.11655, 0.0, 0.0),
 ]
 BASE_LINK_TO_BASE: Matrix = [[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
-TOOL0_TO_PALM: Matrix = [[-1, 0, 0, 0], [0, 0, 1, 0.107], [0, 1, 0, 0], [0, 0, 0, 1]]
+BRACKET_TWIST = -math.pi / 8
+TOOL0_TO_GRIPPER_MOUNT: Matrix = [
+    [math.cos(BRACKET_TWIST), -math.sin(BRACKET_TWIST), 0, 0],
+    [math.sin(BRACKET_TWIST), math.cos(BRACKET_TWIST), 0, 0],
+    [0, 0, 1, 0.0244],
+    [0, 0, 0, 1],
+]
+GRIPPER_MOUNT_TO_PALM: Matrix = [[-1, 0, 0, 0], [0, 0, 1, 0.107], [0, 1, 0, 0], [0, 0, 0, 1]]
 
 GO_STEPS = 120
 HOLD_STEPS = 60
@@ -109,7 +116,7 @@ def palm_pose(q: Joints) -> Matrix:
     pose = BASE_LINK_TO_BASE
     for (d, a, alpha), theta in zip(UR12E_DH, q, strict=True):
         pose = matmul(pose, dh(d, a, alpha, theta))
-    return matmul(pose, TOOL0_TO_PALM)
+    return matmul(matmul(pose, TOOL0_TO_GRIPPER_MOUNT), GRIPPER_MOUNT_TO_PALM)
 
 
 def cross(u: list[float], v: list[float]) -> list[float]:

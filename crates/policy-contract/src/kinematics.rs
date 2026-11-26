@@ -1,6 +1,6 @@
 use crate::Joints;
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
-use std::f64::consts::{FRAC_PI_2, PI};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_8, PI};
 
 struct DhLink {
     d: f64,
@@ -45,7 +45,13 @@ const UR12E: [DhLink; 6] = [
     },
 ];
 
-const PALM_OFFSET_IN_TOOL0: Vector3<f64> = Vector3::new(0.0, 0.107, 0.0);
+/// The wrist bracket in `robot/gripper.urdf.xacro`, which also carries the camera. Its face is
+/// turned 22.5° from the flange's so that both can be bolted on, and the gripper turns with it.
+const BRACKET_THICKNESS: f64 = 0.0244;
+const BRACKET_TWIST: f64 = -FRAC_PI_8;
+
+/// Where the training simulation, whose gripper is bolted straight onto the flange, has the palm.
+const PALM_OFFSET_IN_GRIPPER_MOUNT: Vector3<f64> = Vector3::new(0.0, 0.107, 0.0);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PalmPose {
@@ -57,23 +63,27 @@ pub struct PalmPose {
 /// The palm's pose in `base_link`, which is the DH base (`base`) turned 180° about z.
 #[must_use]
 pub fn palm_pose(joints: &Joints) -> PalmPose {
-    let palm = tool0_pose(joints) * tool0_to_palm();
+    PalmPose::new(&(tool0_pose(joints) * tool0_to_gripper_mount() * gripper_mount_to_palm()))
+}
 
-    let position = palm.translation.vector;
-    let rotation = palm.rotation;
-    let mut orientation = [rotation.w, rotation.i, rotation.j, rotation.k];
-    // On a tie the first component, in `w, x, y, z` order, decides the sign; `max_by` returns the
-    // last of equals, hence the reversal.
-    let largest = orientation
-        .iter()
-        .rev()
-        .max_by(|a, b| a.abs().total_cmp(&b.abs()));
-    if largest.is_some_and(|&c| c < 0.0) {
-        orientation = orientation.map(|c| -c);
-    }
-    PalmPose {
-        position: [position.x, position.y, position.z],
-        orientation,
+impl PalmPose {
+    fn new(palm: &Isometry3<f64>) -> Self {
+        let position = palm.translation.vector;
+        let rotation = palm.rotation;
+        let mut orientation = [rotation.w, rotation.i, rotation.j, rotation.k];
+        // On a tie the first component, in `w, x, y, z` order, decides the sign; `max_by` returns the
+        // last of equals, hence the reversal.
+        let largest = orientation
+            .iter()
+            .rev()
+            .max_by(|a, b| a.abs().total_cmp(&b.abs()));
+        if largest.is_some_and(|&c| c < 0.0) {
+            orientation = orientation.map(|c| -c);
+        }
+        Self {
+            position: [position.x, position.y, position.z],
+            orientation,
+        }
     }
 }
 
@@ -97,11 +107,18 @@ fn dh_transform(link: &DhLink, theta: f64) -> Isometry3<f64> {
     Isometry3::from_parts(translation, rotation)
 }
 
-fn tool0_to_palm() -> Isometry3<f64> {
-    let palm_axes_in_tool0 = [-Vector3::x(), Vector3::z(), Vector3::y()];
+fn tool0_to_gripper_mount() -> Isometry3<f64> {
+    Isometry3::new(
+        Vector3::z() * BRACKET_THICKNESS,
+        Vector3::z() * BRACKET_TWIST,
+    )
+}
+
+fn gripper_mount_to_palm() -> Isometry3<f64> {
+    let palm_axes_in_gripper_mount = [-Vector3::x(), Vector3::z(), Vector3::y()];
     Isometry3::from_parts(
-        PALM_OFFSET_IN_TOOL0.into(),
-        UnitQuaternion::from_basis_unchecked(&palm_axes_in_tool0),
+        PALM_OFFSET_IN_GRIPPER_MOUNT.into(),
+        UnitQuaternion::from_basis_unchecked(&palm_axes_in_gripper_mount),
     )
 }
 
@@ -110,7 +127,7 @@ mod tests {
     use super::*;
     use crate::ARM_JOINTS;
     use approx::assert_abs_diff_eq;
-    use nalgebra::{Rotation3, Unit, Vector2, Vector4};
+    use nalgebra::{Rotation3, Unit, Vector4};
     use roxmltree::{Document, Node};
     use std::{process::Command, sync::LazyLock};
     use test_case::test_case;
@@ -200,46 +217,44 @@ mod tests {
         assert_abs_diff_eq!(dh.to_homogeneous(), urdf.to_homogeneous(), epsilon = 1e-6);
     }
 
-    #[test]
-    fn bracket_matches_xacro() {
-        let arm = urdf_pose(&ARM_URDF, "tool0", "gripper_mount", &[0.0; 6]);
-        let gripper = gripper_pose("gripper_mount");
+    #[test_case(&ARM_URDF)]
+    #[test_case(&GRIPPER_URDF)]
+    fn bracket_matches_urdf(urdf: &Document<'_>) {
+        let urdf = urdf_pose(urdf, "tool0", "gripper_mount", &[0.0; 6]).unwrap();
 
         assert_abs_diff_eq!(
-            arm.unwrap().to_homogeneous(),
-            gripper.to_homogeneous(),
+            tool0_to_gripper_mount().to_homogeneous(),
+            urdf.to_homogeneous(),
             epsilon = 1e-6
         );
     }
 
-    /// The palm's axes are the 2F-140's relabelled, as they come out exactly for a gripper bolted
-    /// straight onto the flange: its x is the fingers' closing axis and its y the approach.
+    /// The palm's x is the fingers' closing axis and its y the approach.
     #[test]
-    fn palm_matches_gripper() {
+    fn palm_axes_match_gripper() {
         let gripper = gripper_pose("robotiq_140_base_link");
 
-        let palm_in_gripper = gripper.inverse() * tool0_to_palm();
+        let palm_in_gripper =
+            gripper.inverse() * tool0_to_gripper_mount() * gripper_mount_to_palm();
 
         let palm_axes_in_gripper = [Vector3::y(), Vector3::z(), Vector3::x()];
         assert_abs_diff_eq!(
             palm_in_gripper.rotation.to_rotation_matrix(),
             Rotation3::from_basis_unchecked(&palm_axes_in_gripper),
-            epsilon = 0.001
-        );
-        assert_abs_diff_eq!(
-            palm_in_gripper.translation.vector.xy(),
-            Vector2::zeros(),
-            epsilon = 0.001
+            epsilon = 1e-6
         );
     }
 
+    /// The example is the training simulation's, whose gripper is bolted straight onto the flange.
     #[test]
     #[expect(
         clippy::approx_constant,
         reason = "the contract's example pose, as written"
     )]
     fn contract_example() {
-        let pose = palm_pose(&[-0.2055, -0.60, 1.15, -3.60, 1.5708, 0.0]);
+        let joints = [-0.2055, -0.60, 1.15, -3.60, 1.5708, 0.0];
+
+        let pose = PalmPose::new(&(tool0_pose(&joints) * gripper_mount_to_palm()));
 
         assert_abs_diff_eq!(
             Vector3::from(pose.position),

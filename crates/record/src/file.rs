@@ -157,7 +157,7 @@ mod tests {
     }
 
     #[test]
-    fn t_is_rounded_to_a_tenth_of_a_millisecond() {
+    fn t_rounded_to_tenth_ms() {
         let start = Instant::now();
         let mut episode = Episode::new("task", start);
         episode.add_step(

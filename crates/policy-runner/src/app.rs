@@ -265,26 +265,26 @@ mod tests {
         KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
     }
 
-    #[test_case(Phase::Idle, press(KeyCode::Enter) => Action::MoveToStart)]
-    #[test_case(Phase::Idle, press(KeyCode::Esc) => Action::None)]
-    #[test_case(Phase::Idle, ctrl_c() => Action::Quit)]
-    #[test_case(Phase::Idle, press(KeyCode::Char('q')) => Action::Quit)]
-    #[test_case(Phase::Idle, press(KeyCode::Char('t')) => Action::EditTask)]
-    #[test_case(Phase::MovingToStart, press(KeyCode::Enter) => Action::None)]
-    #[test_case(Phase::MovingToStart, press(KeyCode::Esc) => Action::Abort)]
-    #[test_case(Phase::MovingToStart, ctrl_c() => Action::Abort)]
-    #[test_case(Phase::MovingToStart, press(KeyCode::Char('q')) => Action::None)]
-    #[test_case(Phase::MovingToStart, press(KeyCode::Char('t')) => Action::None)]
-    #[test_case(Phase::AtStart, press(KeyCode::Enter) => Action::StartEpisode)]
-    #[test_case(Phase::AtStart, press(KeyCode::Esc) => Action::None)]
-    #[test_case(Phase::AtStart, ctrl_c() => Action::Quit)]
-    #[test_case(Phase::AtStart, press(KeyCode::Char('q')) => Action::Quit)]
-    #[test_case(Phase::AtStart, press(KeyCode::Char('t')) => Action::EditTask)]
-    #[test_case(Phase::Running, press(KeyCode::Enter) => Action::None)]
-    #[test_case(Phase::Running, press(KeyCode::Esc) => Action::Abort)]
-    #[test_case(Phase::Running, ctrl_c() => Action::Abort)]
-    #[test_case(Phase::Running, press(KeyCode::Char('q')) => Action::None)]
-    #[test_case(Phase::Running, press(KeyCode::Char('t')) => Action::None)]
+    #[test_case(Phase::Idle, press(KeyCode::Enter) => Action::MoveToStart; "idle enter")]
+    #[test_case(Phase::Idle, press(KeyCode::Esc) => Action::None; "idle esc")]
+    #[test_case(Phase::Idle, ctrl_c() => Action::Quit; "idle ctrl c")]
+    #[test_case(Phase::Idle, press(KeyCode::Char('q')) => Action::Quit; "idle q")]
+    #[test_case(Phase::Idle, press(KeyCode::Char('t')) => Action::EditTask; "idle t")]
+    #[test_case(Phase::MovingToStart, press(KeyCode::Enter) => Action::None; "moving enter")]
+    #[test_case(Phase::MovingToStart, press(KeyCode::Esc) => Action::Abort; "moving esc")]
+    #[test_case(Phase::MovingToStart, ctrl_c() => Action::Abort; "moving ctrl c")]
+    #[test_case(Phase::MovingToStart, press(KeyCode::Char('q')) => Action::None; "moving q")]
+    #[test_case(Phase::MovingToStart, press(KeyCode::Char('t')) => Action::None; "moving t")]
+    #[test_case(Phase::AtStart, press(KeyCode::Enter) => Action::StartEpisode; "at start enter")]
+    #[test_case(Phase::AtStart, press(KeyCode::Esc) => Action::None; "at start esc")]
+    #[test_case(Phase::AtStart, ctrl_c() => Action::Quit; "at start ctrl c")]
+    #[test_case(Phase::AtStart, press(KeyCode::Char('q')) => Action::Quit; "at start q")]
+    #[test_case(Phase::AtStart, press(KeyCode::Char('t')) => Action::EditTask; "at start t")]
+    #[test_case(Phase::Running, press(KeyCode::Enter) => Action::None; "running enter")]
+    #[test_case(Phase::Running, press(KeyCode::Esc) => Action::Abort; "running esc")]
+    #[test_case(Phase::Running, ctrl_c() => Action::Abort; "running ctrl c")]
+    #[test_case(Phase::Running, press(KeyCode::Char('q')) => Action::None; "running q")]
+    #[test_case(Phase::Running, press(KeyCode::Char('t')) => Action::None; "running t")]
     fn key_table(phase: Phase, key: KeyEvent) -> Action {
         action(phase, false, key)
     }
@@ -307,12 +307,12 @@ mod tests {
         assert_eq!(action(Phase::AtStart, false, key), Action::None);
     }
 
-    #[test_case(press(KeyCode::Char('q')) => Action::TypeTask('q'))]
+    #[test_case(press(KeyCode::Char('q')) => Action::TypeTask('q'); "q types")]
     #[test_case(press(KeyCode::Char(' ')) => Action::TypeTask(' '); "space types")]
-    #[test_case(press(KeyCode::Backspace) => Action::EraseTask)]
-    #[test_case(press(KeyCode::Enter) => Action::ConfirmTask)]
-    #[test_case(press(KeyCode::Esc) => Action::CancelTask)]
-    #[test_case(ctrl_c() => Action::Quit)]
+    #[test_case(press(KeyCode::Backspace) => Action::EraseTask; "backspace erases")]
+    #[test_case(press(KeyCode::Enter) => Action::ConfirmTask; "enter confirms")]
+    #[test_case(press(KeyCode::Esc) => Action::CancelTask; "esc cancels")]
+    #[test_case(ctrl_c() => Action::Quit; "ctrl c quits")]
     fn task_editor(key: KeyEvent) -> Action {
         action(Phase::Idle, true, key)
     }
@@ -381,7 +381,7 @@ mod tests {
     #[test_case(None, LIVE; "policy not polled")]
     #[test_case(Some(Readiness::Unreachable("refused".to_owned())), LIVE; "policy unreachable")]
     #[test_case(Some(Readiness::Ready), Robot { gripper_live: false, ..LIVE }; "stale gripper")]
-    fn move_to_start_needs_only_the_arm(readiness: Option<Readiness>, robot: Robot) {
+    fn move_needs_only_arm(readiness: Option<Readiness>, robot: Robot) {
         let shared = shared_with(readiness);
         let (mut app, received) = app(&shared);
         app.handle(press(KeyCode::Enter), robot);

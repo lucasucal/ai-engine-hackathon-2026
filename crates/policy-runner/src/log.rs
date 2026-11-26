@@ -69,7 +69,7 @@ mod tests {
     }
 
     #[test]
-    fn drops_the_oldest_past_capacity() {
+    fn drops_oldest() {
         let log = Log::new();
         for i in 0..=CAPACITY {
             log.push(i.to_string());

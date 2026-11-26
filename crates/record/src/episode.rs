@@ -160,7 +160,7 @@ mod tests {
     use policy_contract::wire::Proprio;
 
     #[test]
-    fn recorded_proprio_matches_the_contract() -> serde_json::Result<()> {
+    fn proprio_matches_contract() -> serde_json::Result<()> {
         let joint_pos = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
         let palm = kinematics::palm_pose(&joint_pos);
         let recorded = RecordedProprio {

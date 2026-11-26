@@ -115,7 +115,7 @@ mod tests {
 
     #[test_case(START_POSE => MIN_START_MOVE; "already there")]
     #[test_case(offset(5, -2.0 * PI) => Duration::from_secs(20); "full turn backwards")]
-    fn start_move_scales_with_distance(from: Joints) -> Duration {
+    fn start_move_duration(from: Joints) -> Duration {
         start_move(&from)
     }
 }

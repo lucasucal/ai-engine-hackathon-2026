@@ -326,9 +326,9 @@ mod tests {
     use std::assert_matches;
     use test_case::test_case;
 
-    #[test_case(&[[0.25; 6]] => vec![[0.5; 6]])]
-    #[test_case(&[[0.25; 6], [0.75; 6]] => vec![[0.5; 6], [1.0; 6]])]
-    #[test_case(&[[0.0, 0.5, -0.5, 0.0, 0.0, 0.0]] => vec![[0.0, 1.0, -1.0, 0.0, 0.0, 0.0]])]
+    #[test_case(&[[0.25; 6]] => vec![[0.5; 6]]; "one step")]
+    #[test_case(&[[0.25; 6], [0.75; 6]] => vec![[0.5; 6], [1.0; 6]]; "two steps")]
+    #[test_case(&[[0.0, 0.5, -0.5, 0.0, 0.0, 0.0]] => vec![[0.0, 1.0, -1.0, 0.0, 0.0, 0.0]]; "per joint")]
     fn velocities_per_step(positions: &[Joints]) -> Vec<Joints> {
         step_velocities(&[0.0; 6], positions, Duration::from_millis(500))
     }

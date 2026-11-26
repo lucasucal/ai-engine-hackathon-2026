@@ -377,17 +377,19 @@ mod tests {
         assert!(shows(&screen, "– black frame"), "{screen:#?}");
     }
 
-    #[test_case(Health::Up, Readiness::Ready => "health up    ready yes")]
-    #[test_case(Health::Up, Readiness::NotReady => "health up    ready no")]
+    #[test_case(Health::Up, Readiness::Ready => "health up    ready yes"; "ready")]
+    #[test_case(Health::Up, Readiness::NotReady => "health up    ready no"; "not ready")]
     #[test_case(
         Health::Unreachable("refused".to_owned()),
         Readiness::Unreachable("refused".to_owned())
-        => "health down    ready no")]
-    #[test_case(Health::HttpStatus(503), Readiness::HttpStatus(503) => "health down    ready no")]
+        => "health down    ready no";
+        "unreachable")]
+    #[test_case(Health::HttpStatus(503), Readiness::HttpStatus(503) => "health down    ready no"; "http error")]
     #[test_case(
         Health::Up,
         Readiness::Incompatible { contract: Some("v1".to_owned()), schema_version: Some(2) }
-        => "health up    ready no (incompatible: v1, 2)")]
+        => "health up    ready no (incompatible: v1, 2)";
+        "incompatible")]
     fn policy_status(health: Health, readiness: Readiness) -> String {
         let shared = shared();
         *shared.policy.lock() = Some(PolicyStatus { health, readiness });
@@ -398,14 +400,14 @@ mod tests {
             .to_owned()
     }
 
-    #[test_case(&Health::Up => Some(Color::Green))]
-    #[test_case(&Health::Unreachable("refused".to_owned()) => Some(Color::Red))]
+    #[test_case(&Health::Up => Some(Color::Green); "up")]
+    #[test_case(&Health::Unreachable("refused".to_owned()) => Some(Color::Red); "down")]
     fn health_color(health: &Health) -> Option<Color> {
         health_label(health).style.fg
     }
 
-    #[test_case(&Readiness::Ready => Some(Color::Green))]
-    #[test_case(&Readiness::NotReady => Some(Color::Yellow))]
+    #[test_case(&Readiness::Ready => Some(Color::Green); "ready")]
+    #[test_case(&Readiness::NotReady => Some(Color::Yellow); "not ready")]
     fn readiness_color(readiness: &Readiness) -> Option<Color> {
         readiness_label(readiness).style.fg
     }

@@ -10,7 +10,7 @@
   <arg name="headless_mode" default="true"
        description="Send the driver's program on connect, which needs the robot in Remote Control mode; false to play External Control on the pendant in Local mode"/>
   <arg name="hand_guiding" default="true"
-       description="Start hand-guiding: while its button is held, the arm is in freedrive and the throttle opens the gripper"/>
+       description="Start hand-guiding: while its button is held, the arm is in freedrive and the throttle closes the gripper"/>
   <!-- Here, as below the includes $(dirname) would be the last included file's. -->
   <let name="ur_overrides" value="$(dirname)/ur_overrides.yaml"/>
   <let name="gripper_controllers" value="$(dirname)/gripper_controllers.yaml"/>

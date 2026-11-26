@@ -36,7 +36,7 @@ enum Phase {
     },
 }
 
-/// While the button is held, the arm is in freedrive and the throttle opens the gripper.
+/// While the button is held, the arm is in freedrive and the throttle closes the gripper.
 fn main() -> Result<()> {
     color_eyre::install()?;
     let stop = Arc::new(AtomicBool::new(false));

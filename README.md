@@ -68,8 +68,8 @@ also starts the Gemini 336 unless given `camera:=false`.
 
 `mock-robot` and `real-robot` also start hand-guiding, unless given `hand_guiding:=false`. While the
 button on the arm's digital input 0 is held, the arm is in freedrive, to be moved by hand, and the
-throttle on analog input 1 opens the gripper: released closes it, pressed fully opens it. Releasing
-the button hands the arm back to `joint_trajectory_controller`, which holds it where it is.
+throttle on analog input 1 closes the gripper: released opens it to 80%, pressed fully closes it.
+Releasing the button hands the arm back to `joint_trajectory_controller`, which holds it where it is.
 
 Don't press the button during a policy episode: hand-guiding takes the arm and the gripper from the
 policy runner.

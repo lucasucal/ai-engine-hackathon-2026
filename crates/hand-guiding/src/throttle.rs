@@ -14,6 +14,8 @@ const VALID_V: RangeInclusive<f64> = 0.75..=4.50;
 // mid-travel, the throttle's raw reading spanned up to 1.5 of them, peak to peak.
 const HYSTERESIS: f64 = 2.0 / 227.0;
 const STALE_AFTER: Duration = Duration::from_millis(100);
+// Less travel to close makes it easier to grasp objects while hand-guiding.
+const MAX_OPENING: f64 = 0.8;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Reading {
@@ -46,9 +48,10 @@ pub fn volts(reading: Option<Reading>, now: Instant) -> Result<f64, Fault> {
     Ok(reading.volts)
 }
 
-/// The gripper opening the throttle asks for: released closes it, pressed fully opens it.
+/// The gripper opening the throttle asks for: released opens it to `MAX_OPENING`, pressed fully
+/// closes it. Open by default is the safer state.
 pub fn opening(volts: f64) -> f64 {
-    ((volts - RELEASED_V) / (PRESSED_V - RELEASED_V)).clamp(0.0, 1.0)
+    MAX_OPENING * ((PRESSED_V - volts) / (PRESSED_V - RELEASED_V)).clamp(0.0, 1.0)
 }
 
 /// Holds the opening until the throttle asks for `HYSTERESIS` more or less, or for either end.
@@ -59,7 +62,7 @@ pub struct Hysteresis {
 
 impl Hysteresis {
     pub fn update(&mut self, target: f64) -> f64 {
-        let at_end = target <= 0.0 || target >= 1.0;
+        let at_end = target <= 0.0 || target >= MAX_OPENING;
         match self.held.map(|held| (held, (target - held).abs())) {
             Some((held, moved)) if moved < HYSTERESIS && !(at_end && moved > 0.0) => held,
             _ => *self.held.insert(target),
@@ -72,17 +75,18 @@ mod tests {
     use super::*;
     use test_case::test_case;
 
-    #[test_case(0.5 => 0.0; "below released")]
-    #[test_case(RELEASED_V => 0.0; "released")]
-    #[test_case(PRESSED_V => 1.0; "pressed")]
-    #[test_case(4.4 => 1.0; "past pressed")]
+    #[test_case(0.5 => MAX_OPENING; "below released")]
+    #[test_case(RELEASED_V => MAX_OPENING; "released")]
+    #[test_case(PRESSED_V => 0.0; "pressed")]
+    #[test_case(4.4 => 0.0; "past pressed")]
     fn opening_at(volts: f64) -> f64 {
         opening(volts)
     }
 
     #[test]
-    fn half_way_is_half_open() {
-        assert!((opening(f64::midpoint(RELEASED_V, PRESSED_V)) - 0.5).abs() < 1e-12);
+    fn half_way_is_half_of_max_opening() {
+        let half_way = opening(f64::midpoint(RELEASED_V, PRESSED_V));
+        assert!((half_way - MAX_OPENING / 2.0).abs() < 1e-12);
     }
 
     #[test_case(None, 0 => Err(Fault::Stale); "no reading")]
@@ -101,7 +105,8 @@ mod tests {
     #[test_case(&[0.5, 0.505, 0.495] => vec![0.5, 0.5, 0.5]; "jitter held")]
     #[test_case(&[0.5, 0.51] => vec![0.5, 0.51]; "a real move")]
     #[test_case(&[0.005, 0.0] => vec![0.005, 0.0]; "closed end always reached")]
-    #[test_case(&[0.995, 1.0] => vec![0.995, 1.0]; "open end always reached")]
+    #[test_case(&[MAX_OPENING - 0.005, MAX_OPENING] => vec![MAX_OPENING - 0.005, MAX_OPENING];
+        "open end always reached")]
     fn held(targets: &[f64]) -> Vec<f64> {
         let mut hysteresis = Hysteresis::default();
         targets.iter().map(|&t| hysteresis.update(t)).collect()

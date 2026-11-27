@@ -34,7 +34,8 @@
 
   <!-- compressed_image_transport publishes each color frame as JPEG on
        /<camera_name>/color/image_raw/compressed. Without a serial number, the driver opens
-       whichever Orbbec enumerates first. The wrist camera is a Gemini 335Lg, the side ones Gemini 336s. -->
+       whichever Orbbec enumerates first. The wrist camera is a Gemini 335Lg, the side ones Gemini 336s.
+       They start 2 s apart, as in Orbbec's multi_camera.launch.py: opening several at once can fail. -->
   <let name="orbbec_launch" value="$(find-pkg-share orbbec_camera)/launch/gemini_330_series.launch.py"/>
   <include file="$(var orbbec_launch)" if="$(var camera)">
     <arg name="camera_name" value="wrist_camera"/>
@@ -49,32 +50,36 @@
     <arg name="enable_point_cloud" value="false"/>
     <arg name="enable_colored_point_cloud" value="false"/>
   </include>
-  <include file="$(var orbbec_launch)" if="$(var camera)">
-    <arg name="camera_name" value="left_camera"/>
-    <arg name="serial_number" value="CP999450005M"/>
-    <arg name="device_num" value="3"/>
-    <arg name="color_width" value="640"/>
-    <arg name="color_height" value="360"/>
-    <arg name="color_fps" value="30"/>
-    <arg name="enable_depth" value="false"/>
-    <arg name="enable_left_ir" value="false"/>
-    <arg name="enable_right_ir" value="false"/>
-    <arg name="enable_point_cloud" value="false"/>
-    <arg name="enable_colored_point_cloud" value="false"/>
-  </include>
-  <include file="$(var orbbec_launch)" if="$(var camera)">
-    <arg name="camera_name" value="right_camera"/>
-    <arg name="serial_number" value="CP999450001G"/>
-    <arg name="device_num" value="3"/>
-    <arg name="color_width" value="640"/>
-    <arg name="color_height" value="360"/>
-    <arg name="color_fps" value="30"/>
-    <arg name="enable_depth" value="false"/>
-    <arg name="enable_left_ir" value="false"/>
-    <arg name="enable_right_ir" value="false"/>
-    <arg name="enable_point_cloud" value="false"/>
-    <arg name="enable_colored_point_cloud" value="false"/>
-  </include>
+  <timer period="2.0">
+    <include file="$(var orbbec_launch)" if="$(var camera)">
+      <arg name="camera_name" value="left_camera"/>
+      <arg name="serial_number" value="CP999450005M"/>
+      <arg name="device_num" value="3"/>
+      <arg name="color_width" value="640"/>
+      <arg name="color_height" value="360"/>
+      <arg name="color_fps" value="30"/>
+      <arg name="enable_depth" value="false"/>
+      <arg name="enable_left_ir" value="false"/>
+      <arg name="enable_right_ir" value="false"/>
+      <arg name="enable_point_cloud" value="false"/>
+      <arg name="enable_colored_point_cloud" value="false"/>
+    </include>
+  </timer>
+  <timer period="4.0">
+    <include file="$(var orbbec_launch)" if="$(var camera)">
+      <arg name="camera_name" value="right_camera"/>
+      <arg name="serial_number" value="CP999450001G"/>
+      <arg name="device_num" value="3"/>
+      <arg name="color_width" value="640"/>
+      <arg name="color_height" value="360"/>
+      <arg name="color_fps" value="30"/>
+      <arg name="enable_depth" value="false"/>
+      <arg name="enable_left_ir" value="false"/>
+      <arg name="enable_right_ir" value="false"/>
+      <arg name="enable_point_cloud" value="false"/>
+      <arg name="enable_colored_point_cloud" value="false"/>
+    </include>
+  </timer>
 
   <node pkg="rviz2" exec="rviz2" args="-d $(var rviz_config)" if="$(var rviz)"/>
 

@@ -3,7 +3,7 @@ use jiff::ZonedDateTime;
 use policy_contract::{
     Joints, gripper,
     image::{FRAME_SIZE, FrameError, VIEWS, check_jpeg},
-    kinematics,
+    kinematics, policy_joints,
 };
 use serde::Serialize;
 use std::{fmt, time::Instant};
@@ -141,10 +141,11 @@ pub fn observe(ros: &Ros, now: Instant, permissive: bool) -> Result<Observation,
             Err(stale) => return Err(stale),
         }
     }
-    let palm = kinematics::palm_pose(&arm.position);
+    let joint_pos = policy_joints(arm.position);
+    let palm = kinematics::palm_pose(&joint_pos);
     Ok(Observation {
         proprio: RecordedProprio {
-            joint_pos: arm.position,
+            joint_pos,
             joint_vel: arm.velocity,
             gripper,
             ee_pos: palm.position,

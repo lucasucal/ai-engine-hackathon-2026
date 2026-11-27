@@ -201,8 +201,8 @@ fn draw_progress(frame: &mut Frame<'_>, rows: &[Rect], progress: &Progress) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{:<10}{}    Retries {}",
-            "Late", progress.counts.late, progress.counts.retries
+            "{:<10}{}    Retries {}    Held {}",
+            "Late", progress.counts.late, progress.counts.retries, progress.counts.held
         )),
         *counts,
     );
@@ -478,6 +478,7 @@ mod tests {
                 steps: 120,
                 late: 3,
                 retries: 1,
+                held: 2,
             },
             latencies: vec![Duration::from_millis(23), Duration::from_millis(80)],
             tracking_error: 0.04,
@@ -485,7 +486,10 @@ mod tests {
         let screen = screen(&shared, CameraSource::BlackImage, LIVE);
         assert!(shows(&screen, "running an episode"), "{screen:#?}");
         assert!(shows(&screen, &format!("120 / {STEPS}")), "{screen:#?}");
-        assert!(shows(&screen, "Late      3    Retries 1"), "{screen:#?}");
+        assert!(
+            shows(&screen, "Late      3    Retries 1    Held 2"),
+            "{screen:#?}"
+        );
         assert!(shows(&screen, "last 80 ms"), "{screen:#?}");
 
         let footer = screen.last().map_or("", String::as_str).trim_end();

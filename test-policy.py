@@ -358,8 +358,10 @@ class Policy:
             delay = self.args.slow_delay
         time.sleep(delay / 1000)
 
-        if self.args.save_image:
-            Path(self.args.save_image).write_bytes(base64.b64decode(request["images"]["top"]))
+        if self.args.save_images:
+            images = {**request["images"], "goal": request["goal"]}
+            for name, jpeg in images.items():
+                Path(self.args.save_images, f"{name}.jpg").write_bytes(base64.b64decode(jpeg))
 
         if self.args.chunk > 1:
             actions = [self.joint_delta(request, step + i) for i in range(self.args.chunk)]
@@ -460,7 +462,10 @@ def main() -> None:
     )
     _ = parser.add_argument("--hang", action="store_true", help="never reply to /act")
     _ = parser.add_argument("--log-requests", action="store_true", help="print each /act call")
-    _ = parser.add_argument("--save-image", help="write the last received image to this file")
+    _ = parser.add_argument(
+        "--save-images",
+        help="write the last received images and goal to this folder, as <view>.jpg and goal.jpg",
+    )
     args = parser.parse_args()
     if args.replay is not None and args.offset is not None:
         parser.error("--replay and --offset are alternatives")

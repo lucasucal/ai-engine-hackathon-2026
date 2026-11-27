@@ -17,7 +17,7 @@ struct Header<'a> {
     step_s: f64,
     started_at: &'a str,
     ended_by: &'a str,
-    steps_without_image: u32,
+    black_frames: usize,
     joint_names: [&'a str; 6],
 }
 
@@ -49,7 +49,7 @@ pub fn save(episode: &Episode, out_dir: &Path, ended_by: &str) -> Result<PathBuf
         step_s: STEP.as_secs_f64(),
         started_at: &episode.started_at,
         ended_by,
-        steps_without_image: episode.steps_without_image,
+        black_frames: episode.black_frames,
         joint_names: ARM_JOINTS,
     };
     let header = serde_json::to_string_pretty(&header)?;
@@ -63,19 +63,17 @@ pub fn save(episode: &Episode, out_dir: &Path, ended_by: &str) -> Result<PathBuf
         if index > 0 {
             writer.write_all(b",\n")?;
         }
-        let jpeg = match &step.image {
-            Image::Camera(jpeg) => jpeg.as_slice(),
-            Image::Black => BLACK_JPEG,
-        };
+        let images = step.images.each_ref().map(|image| match image {
+            Image::Camera(jpeg) => BASE64.encode(jpeg),
+            Image::Black => BASE64.encode(BLACK_JPEG),
+        });
         writer.write_all(b"    ")?;
         serde_json::to_writer(
             &mut writer,
             &StepLine {
                 step: index,
                 t: step.t,
-                images: Images {
-                    top: BASE64.encode(jpeg),
-                },
+                images: images.into(),
                 proprio: &step.proprio,
                 gripper_command: step.gripper_command,
             },
@@ -97,7 +95,7 @@ mod tests {
     use serde_json::Value;
     use std::time::{Duration, Instant};
 
-    fn step(image: Image) -> Observation {
+    fn step(images: [Image; 3]) -> Observation {
         Observation {
             proprio: RecordedProprio {
                 joint_pos: [0.0; 6],
@@ -106,7 +104,7 @@ mod tests {
                 ee_pos: [0.0; 3],
                 ee_quat: [1.0, 0.0, 0.0, 0.0],
             },
-            image,
+            images,
         }
     }
 
@@ -114,8 +112,13 @@ mod tests {
     fn layout() -> Result<()> {
         let start = Instant::now();
         let mut episode = Episode::new("task", start);
-        episode.add_step(start, step(Image::Black), 0.0);
-        episode.add_step(start + STEP, step(Image::Camera(BLACK_JPEG.to_vec())), 0.0);
+        episode.add_step(start, step([const { Image::Black }; 3]), 0.0);
+        let camera = Image::Camera(BLACK_JPEG.to_vec());
+        episode.add_step(
+            start + STEP,
+            step([camera.clone(), Image::Black, camera]),
+            0.0,
+        );
         let out_dir = std::env::temp_dir().join(format!("record-test-{}", std::process::id()));
 
         let path = save(&episode, &out_dir, "release")?;
@@ -136,7 +139,7 @@ mod tests {
             "step_s",
             "started_at",
             "ended_by",
-            "steps_without_image",
+            "black_frames",
             "joint_names",
             "steps",
         ];
@@ -148,10 +151,12 @@ mod tests {
         assert!(positions.is_sorted(), "{positions:?}");
 
         let json: Value = serde_json::from_str(&text)?;
-        assert_eq!(json["steps_without_image"], 1);
+        assert_eq!(json["black_frames"], 4);
         assert_eq!(json["steps"][1]["t"], 0.05);
         assert_eq!(json["steps"][0]["proprio"]["gripper"], Value::Null);
-        assert_eq!(json["steps"][0]["images"]["top"], BASE64.encode(BLACK_JPEG));
+        for view in ["wrist", "left", "right"] {
+            assert_eq!(json["steps"][1]["images"][view], BASE64.encode(BLACK_JPEG));
+        }
         assert_eq!(json["steps"][0]["gripper_command"], 1.0);
         Ok(())
     }
@@ -162,7 +167,7 @@ mod tests {
         let mut episode = Episode::new("task", start);
         episode.add_step(
             start + Duration::from_micros(50_049),
-            step(Image::Black),
+            step([const { Image::Black }; 3]),
             0.0,
         );
         let Step { t, .. } = episode.steps[0].clone();

@@ -5,8 +5,17 @@
 Check the [hackathon website](https://www.aiengine.build/reality-check-hack) for more details.
 
 This repo contains a policy runner and ROS 2 stack configuration for the hackathon test stand: a
-UR12e with a Robotiq 2F-140 gripper and an Orbbec Gemini 336 camera. The policy's API is in
+UR12e with a Robotiq 2F-140 gripper and three Orbbec cameras. The policy's API is in
 [API.md](API.md).
+
+| camera | model | serial number |
+|---|---|---|
+| `wrist_camera` | Gemini 335Lg, in USB mode | `CPBDB53000CY` |
+| `left_camera` | Gemini 336 | `CP999450005M` |
+| `right_camera` | Gemini 336 | `CP999450001G` |
+
+`robot/launch.xml` opens each camera by its serial number, so swapping USB ports doesn't swap the
+views; a replaced camera needs its serial number changed there.
 
 ## Devcontainer setup
 
@@ -17,8 +26,8 @@ The dev container expects a Linux host with a Wayland session. It mounts the hos
 and `~/.ssh` read-only, so both must exist. Open the workspace in VS Code and run
 **Dev Containers: Rebuild and Reopen in Container**.
 
-The container sees the host's USB devices, for the Orbbec camera. To be allowed to open the camera,
-install Orbbec's udev rules on the host, then plug the camera in again:
+The container sees the host's USB devices, for the Orbbec cameras. To be allowed to open them,
+install Orbbec's udev rules on the host, then plug the cameras in again:
 
 ```bash
 sudo curl -fsSL -o /etc/udev/rules.d/99-obsensor-libusb.rules \
@@ -26,7 +35,7 @@ sudo curl -fsSL -o /etc/udev/rules.d/99-obsensor-libusb.rules \
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Inside the container, `lsusb` should then list the camera.
+Inside the container, `lsusb` should then list the cameras.
 
 ## Running tasks
 
@@ -40,10 +49,10 @@ In three terminals:
 ```bash
 mise run mock-robot
 mise run test-policy
-mise run policy-runner -- --task <task_id>
+mise run policy-runner -- --task <task_id> --tasks <dir>
 ```
 
-`mock-robot` brings up the UR12e and the gripper on mock hardware, and the real Gemini 336 unless
+`mock-robot` brings up the UR12e and the gripper on mock hardware, and the real cameras unless
 given `camera:=false`. `test-policy` serves a stand-in policy on port 8000; `mise run test-policy --
 --help` lists the replies it can send, including late, chunked and invalid ones.
 
@@ -51,9 +60,20 @@ given `camera:=false`. `test-policy` serves a stand-in policy on port 8000; `mis
 episode's motion and gripper instead, relative to wherever the arm starts.
 
 The policy runner is a terminal UI that runs episodes of the policy against the arm. It sends the
-camera's frames from `/camera/color/image_raw/compressed`, or a black frame if given `--no-camera`.
-An episode fails as soon as the camera's frame is missing or stale, so without a camera plugged in,
-pass `--no-camera`.
+frames from `/{wrist,left,right}_camera/color/image_raw/compressed`, or black frames if given
+`--no-camera`. While any view's frame is missing, stale or not 640×360, the step is retried, until
+the episode runs out of time; so without the cameras plugged in, pass `--no-camera`.
+
+Each episode sends the policy its task's instruction and goal photo, read from the `--tasks` folder
+when the episode starts, so they can be changed between episodes, as can the task with `t`:
+
+```text
+<dir>/<task_id>.txt   the instruction, one line
+<dir>/<task_id>.jpg   the goal photo: the finished scene, a 640×480 JPEG
+```
+
+An episode doesn't start without both. For a stand-in goal,
+`ffmpeg -f lavfi -i color=black:s=640x480 -frames:v 1 <dir>/<task_id>.jpg` makes a black one.
 
 ### On the real robot
 
@@ -64,7 +84,8 @@ mise run policy-runner -- --task <task_id> --policy <url>
 
 By default `real-robot` sends the driver's program on connect, which needs the arm in Remote Control
 mode; with `headless_mode:=false`, play External Control on the pendant in Local mode instead. It
-also starts the Gemini 336 unless given `camera:=false`.
+also starts the three cameras unless given `camera:=false`; `ros2 topic hz` on each
+`/<camera>/color/image_raw/compressed` should then show about 30 Hz.
 
 ### Hand guiding
 
@@ -85,10 +106,11 @@ mise run record -- --task <task_id>
 ```
 
 Each press of the hand-guiding button records an episode; releasing it saves the episode to
-`recording/<task_id>/<episode_id>.json`. An episode also ends, and is saved, after `--max-duration`
-seconds (at most and by default 60), or as soon as the arm, gripper or camera reading goes stale.
-With `--permissive`, a stale camera frame is recorded as a black frame and a stale gripper reading
-as `null` instead; a stale arm still ends the episode. `ended_by` in each file says why it ended.
+`recording/<task_id>/<episode_id>.json`, with the three views in each step's `images`. An episode
+also ends, and is saved, after `--max-duration` seconds (at most and by default 60), or as soon as
+the arm, gripper or any camera reading goes stale. With `--permissive`, a stale camera frame is
+recorded as a black frame and a stale gripper reading as `null` instead; a stale arm still ends the
+episode. `ended_by` in each file says why it ended, and `black_frames` counts the black frames.
 
 `mise run extract-video recording/<task_id>/<episode_id>.json …` turns each episode's camera frames
-into `recording/<task_id>/<episode_id>.mp4`.
+into `recording/<task_id>/<episode_id>_<view>.mp4`, one per view.

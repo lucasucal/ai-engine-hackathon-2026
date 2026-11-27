@@ -2,6 +2,7 @@ use crate::Joints;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// Whistle's cap on the real arm, under Reality Check's 0.10472 and 0.15708 rad.
 const MAX_DELTA: f64 = 0.05;
 const MAX_CHUNK: usize = 16;
 
@@ -10,6 +11,9 @@ pub struct ActRequest<'a> {
     pub episode_id: &'a str,
     pub step: u32,
     pub task_id: &'a str,
+    pub instruction: &'a str,
+    /// The goal photo, base64-encoded.
+    pub goal: &'a str,
     pub schema_version: u32,
     pub images: Images,
     pub proprio: Proprio,
@@ -17,7 +21,16 @@ pub struct ActRequest<'a> {
 
 #[derive(Debug, Serialize)]
 pub struct Images {
-    pub top: String,
+    pub wrist: String,
+    pub left: String,
+    pub right: String,
+}
+
+/// In the order of `image::VIEWS`.
+impl From<[String; 3]> for Images {
+    fn from([wrist, left, right]: [String; 3]) -> Self {
+        Self { wrist, left, right }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -29,7 +42,7 @@ pub struct Proprio {
     pub ee_quat: [f64; 4],
 }
 
-/// One validated 50 ms action.
+/// One validated 50 ms action, clamped to its limits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Action {
     pub delta: Joints,
@@ -85,8 +98,6 @@ pub enum InvalidReply {
     WrongValueCount { at: String, count: usize },
     #[error("{at} is not finite")]
     NotFinite { at: String },
-    #[error("{at} is out of range")]
-    OutOfRange { at: String },
     #[error("a chunk of {0} actions, not 1 to {MAX_CHUNK}")]
     ChunkSize(usize),
     #[error("chunk_len is {chunk_len}, but there are {actions} actions")]
@@ -161,37 +172,24 @@ pub fn validate(
 fn joint_delta(action: &JointDelta, at: &str) -> Result<Action, InvalidReply> {
     reject_unknown(&action.unknown, &format!("{at}."))?;
 
-    let delta =
+    let mut delta =
         Joints::try_from(action.values.as_slice()).map_err(|_| InvalidReply::WrongValueCount {
             at: format!("{at}.values"),
             count: action.values.len(),
         })?;
-    for (i, value) in delta.iter().enumerate() {
-        check_number(*value, MAX_DELTA, &format!("{at}.values[{i}]"))?;
+    for (i, value) in delta.iter_mut().enumerate() {
+        *value = clamp(*value, -MAX_DELTA, MAX_DELTA, &format!("{at}.values[{i}]"))?;
     }
-    let gripper = action.gripper;
-    if !gripper.is_finite() {
-        return Err(InvalidReply::NotFinite {
-            at: format!("{at}.gripper"),
-        });
-    }
-    if !(0.0..=1.0).contains(&gripper) {
-        return Err(InvalidReply::OutOfRange {
-            at: format!("{at}.gripper"),
-        });
-    }
+    let gripper = clamp(action.gripper, 0.0, 1.0, &format!("{at}.gripper"))?;
     Ok(Action { delta, gripper })
 }
 
-/// Checks that `value` is finite and within `[-limit, limit]`.
-fn check_number(value: f64, limit: f64, at: &str) -> Result<(), InvalidReply> {
-    if !value.is_finite() {
-        return Err(InvalidReply::NotFinite { at: at.to_owned() });
+fn clamp(value: f64, min: f64, max: f64, at: &str) -> Result<f64, InvalidReply> {
+    if value.is_finite() {
+        Ok(value.clamp(min, max))
+    } else {
+        Err(InvalidReply::NotFinite { at: at.to_owned() })
     }
-    if value.abs() > limit {
-        return Err(InvalidReply::OutOfRange { at: at.to_owned() });
-    }
-    Ok(())
 }
 
 fn reject_unknown(fields: &Map<String, Value>, prefix: &str) -> Result<(), InvalidReply> {
@@ -257,12 +255,6 @@ mod tests {
     #[test_case(|r, _| r["action"]["_debug"] = json!("x") => matches Ok(_); "underscore in action")]
     #[test_case(|r, _| { r["action"] = chunk(2); r["action"]["actions"][1]["_debug"] = json!(null); }
         => matches Ok(_); "underscore in chunk action")]
-    #[test_case(|r, _| r["action"]["values"][0] = json!(0.051) => matches Err(InvalidReply::OutOfRange { .. }); "delta above range")]
-    #[test_case(|r, _| r["action"]["values"][5] = json!(-0.051) => matches Err(InvalidReply::OutOfRange { .. }); "delta below range")]
-    #[test_case(|r, _| r["action"]["gripper"] = json!(1.01) => matches Err(InvalidReply::OutOfRange { .. }); "gripper above range")]
-    #[test_case(|r, _| r["action"]["gripper"] = json!(-0.01) => matches Err(InvalidReply::OutOfRange { .. }); "gripper below range")]
-    #[test_case(|r, _| { r["action"] = chunk(2); r["action"]["actions"][1]["values"][2] = json!(0.06); }
-        => matches Err(InvalidReply::OutOfRange { .. }); "chunk delta out of range")]
     #[test_case(|r, _| r["action"]["values"] = json!([0.0, 0.0, 0.0, 0.0, 0.0])
         => matches Err(InvalidReply::WrongValueCount { count: 5, .. }); "five values")]
     #[test_case(|r, _| r["action"]["values"] = json!([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -292,6 +284,21 @@ mod tests {
     #[test_case(|_, h| h.step = None => matches Err(InvalidReply::WrongEcho { at: "X-RC-Step", .. }); "missing step header")]
     fn reply_validation(edit: Edit) -> Result<Vec<Action>, InvalidReply> {
         validate_edited(edit)
+    }
+
+    #[test_case(|_, _| () => [0.05, -0.05, 0.0, 0.01, 0.0, 0.0]; "at the limits")]
+    #[test_case(|r, _| r["action"]["values"][0] = json!(0.051) => [0.05, -0.05, 0.0, 0.01, 0.0, 0.0]; "above range")]
+    #[test_case(|r, _| r["action"]["values"][5] = json!(-3.0) => [0.05, -0.05, 0.0, 0.01, 0.0, -0.05]; "below range")]
+    #[test_case(|r, _| { r["action"] = chunk(2); r["action"]["actions"][1]["values"][2] = json!(0.06); }
+        => [0.05, -0.05, 0.05, 0.01, 0.0, 0.0]; "in a chunk")]
+    fn delta_clamped(edit: Edit) -> Joints {
+        validate_edited(edit).unwrap().last().unwrap().delta
+    }
+
+    #[test_case(|r, _| r["action"]["gripper"] = json!(1.01) => 1.0; "above range")]
+    #[test_case(|r, _| r["action"]["gripper"] = json!(-0.01) => 0.0; "below range")]
+    fn gripper_clamped(edit: Edit) -> f64 {
+        validate_edited(edit).unwrap()[0].gripper
     }
 
     #[test]

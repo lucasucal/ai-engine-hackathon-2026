@@ -35,8 +35,8 @@ pub fn serve(
                     Phase::Idle
                 }
             }
-            Command::RunEpisode { task_id } => {
-                let report = Episode::run(ros, policy, &task_id, &shared.cancel, &shared.progress);
+            Command::RunEpisode(task) => {
+                let report = Episode::run(ros, policy, &task, &shared.cancel, &shared.progress);
                 let line = report.to_string();
                 shared.log.push(line.clone());
                 shared.reports.lock().push(line);

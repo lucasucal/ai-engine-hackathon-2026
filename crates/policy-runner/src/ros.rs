@@ -2,13 +2,14 @@ use crate::{gripper::GripperHardware, log::Log};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use color_eyre::{
     Result,
-    eyre::{bail, eyre},
+    eyre::{WrapErr, bail, eyre},
 };
 use parking_lot::Mutex;
 use policy_contract::{
     ARM_JOINTS, Joints,
     gripper::FINGER_JOINT,
-    image::{BLACK_JPEG, check_jpeg},
+    image::{BLACK_JPEG, FRAME_SIZE, VIEWS, check_jpeg},
+    wire::Images,
 };
 use rclrs::{
     Context, CreateBasicExecutor, IntoPrimitiveOptions, Node, Publisher, SpinOptions, Subscription,
@@ -25,7 +26,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const CAMERA_TOPIC: &str = "/camera/color/image_raw/compressed";
+pub const CAMERA_TOPICS: &str = "/{wrist,left,right}_camera/color/image_raw/compressed";
 const SPEED_SCALING_TOPIC: &str = "/speed_scaling_state_broadcaster/speed_scaling";
 const GRIPPER_DESCRIPTION_TOPIC: &str = "/gripper/robot_description";
 const TRAJECTORY_TOPIC: &str = "/joint_trajectory_controller/joint_trajectory";
@@ -73,8 +74,11 @@ pub enum CameraSource {
 }
 
 enum Camera {
-    Black { base64: String },
-    Topic(Latest<Vec<u8>>),
+    Black {
+        base64: String,
+    },
+    /// One per view, in the order of `VIEWS`.
+    Topics([Latest<Vec<u8>>; 3]),
 }
 
 struct Subscriptions {
@@ -82,7 +86,7 @@ struct Subscriptions {
     _finger: Subscription<JointState>,
     _speed_scaling: Subscription<Float64>,
     _gripper_description: Subscription<StringMsg>,
-    _camera: Option<Subscription<CompressedImage>>,
+    _cameras: Vec<Subscription<CompressedImage>>,
 }
 
 impl Ros {
@@ -131,21 +135,27 @@ impl Ros {
                 }
             })?;
 
-        let (camera, camera_subscription) = match source {
+        let (camera, camera_subscriptions) = match source {
             CameraSource::RosTopic => {
-                let frame = Latest::default();
-                // The camera driver publishes best-effort, which a reliable subscription wouldn't
-                // match.
-                let subscription =
-                    node.create_subscription(CAMERA_TOPIC.best_effort().keep_last(1), {
-                        let frame = Arc::clone(&frame);
-                        move |msg: CompressedImage| store(&frame, msg.data)
-                    })?;
-                (Camera::Topic(frame), Some(subscription))
+                let frames: [Latest<Vec<u8>>; 3] = Default::default();
+                let subscriptions = VIEWS
+                    .iter()
+                    .zip(&frames)
+                    .map(|(view, frame)| {
+                        let frame = Arc::clone(frame);
+                        // The camera driver publishes best-effort, which a reliable subscription
+                        // wouldn't match.
+                        node.create_subscription(
+                            camera_topic(view).as_str().best_effort().keep_last(1),
+                            move |msg: CompressedImage| store(&frame, msg.data),
+                        )
+                    })
+                    .collect::<Result<_, _>>()?;
+                (Camera::Topics(frames), subscriptions)
             }
             CameraSource::BlackImage => {
                 let base64 = BASE64.encode(BLACK_JPEG);
-                (Camera::Black { base64 }, None)
+                (Camera::Black { base64 }, Vec::new())
             }
         };
 
@@ -171,7 +181,7 @@ impl Ros {
                 _finger: finger_subscription,
                 _speed_scaling: speed_scaling_subscription,
                 _gripper_description: gripper_description_subscription,
-                _camera: camera_subscription,
+                _cameras: camera_subscriptions,
             },
             _node: node,
             _executor_thread: executor_thread,
@@ -195,27 +205,27 @@ impl Ros {
         *self.gripper_hardware.lock()
     }
 
-    /// Whether the camera's latest frame is fresh; None without a camera topic.
-    pub fn camera_live(&self) -> Option<bool> {
+    /// Whether each view's latest frame is fresh, in the order of `VIEWS`; None without cameras.
+    pub fn cameras_live(&self) -> Option<[bool; 3]> {
         match &self.camera {
             Camera::Black { .. } => None,
-            Camera::Topic(frame) => Some(frame.lock().as_ref().is_some_and(Received::is_fresh)),
+            Camera::Topics(frames) => Some(
+                frames
+                    .each_ref()
+                    .map(|frame| frame.lock().as_ref().is_some_and(Received::is_fresh)),
+            ),
         }
     }
 
-    /// The latest camera frame, base64-encoded, once it passes the frame checks; or the black
-    /// frame without a camera.
-    pub fn image(&self) -> Result<String> {
+    /// Every view's latest frame, base64-encoded, once they all pass the frame checks; or black
+    /// frames without cameras.
+    pub fn images(&self) -> Result<Images> {
         match &self.camera {
-            Camera::Black { base64 } => Ok(base64.clone()),
-            Camera::Topic(frame) => {
-                let frame = latest(frame).ok_or_else(|| eyre!("no camera frame received yet"))?;
-                let age = frame.at.elapsed();
-                if age > STALE_AFTER {
-                    bail!("the latest camera frame is {} ms old", age.as_millis());
-                }
-                check_jpeg(&frame.value)?;
-                Ok(BASE64.encode(&frame.value))
+            Camera::Black { base64 } => Ok(std::array::from_fn(|_| base64.clone()).into()),
+            Camera::Topics(frames) => {
+                let [wrist, left, right] =
+                    std::array::from_fn(|i| checked_frame(VIEWS[i], &frames[i]));
+                Ok([wrist?, left?, right?].into())
             }
         }
     }
@@ -279,6 +289,22 @@ impl Ros {
 }
 
 const STALE_AFTER: Duration = Duration::from_millis(100);
+
+fn camera_topic(view: &str) -> String {
+    format!("/{view}_camera/color/image_raw/compressed")
+}
+
+fn checked_frame(view: &str, frame: &Mutex<Option<Received<Vec<u8>>>>) -> Result<String> {
+    let topic = camera_topic(view);
+    let frame = latest(frame).ok_or_else(|| eyre!("no frame on {topic} yet"))?;
+    let age = frame.at.elapsed();
+    if age > STALE_AFTER {
+        bail!("the latest frame on {topic} is {} ms old", age.as_millis());
+    }
+    check_jpeg(&frame.value, FRAME_SIZE)
+        .wrap_err_with(|| format!("the latest frame on {topic}"))?;
+    Ok(BASE64.encode(&frame.value))
+}
 
 fn by_name<const N: usize>(
     names: &[String],

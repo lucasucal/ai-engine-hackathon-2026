@@ -1,6 +1,6 @@
 use crate::Joints;
 use nalgebra::{Isometry3, Translation3, UnitQuaternion, Vector3};
-use std::f64::consts::{FRAC_PI_2, FRAC_PI_8, PI};
+use std::f64::consts::{FRAC_PI_2, PI};
 
 struct DhLink {
     d: f64,
@@ -45,44 +45,44 @@ const UR12E: [DhLink; 6] = [
     },
 ];
 
-/// The wrist bracket in `robot/gripper.urdf.xacro`, which also carries the camera. Its face is
-/// turned 22.5° from the flange's so that both can be bolted on, and the gripper turns with it.
-const BRACKET_THICKNESS: f64 = 0.0244;
-const BRACKET_TWIST: f64 = -FRAC_PI_8;
-
-/// Where the training simulation, whose gripper is bolted straight onto the flange, has the palm.
-const PALM_OFFSET_IN_GRIPPER_MOUNT: Vector3<f64> = Vector3::new(0.0, 0.107, 0.0);
+/// Reality Check's palm, its `gripperframe` site, along tool0's z: 24.4 mm of bracket, a 7 mm
+/// spacer and 100 mm of gripper.
+const PALM_DISTANCE: f64 = 0.1314;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PalmPose {
     pub position: [f64; 3],
-    /// `w, x, y, z`, with its largest-magnitude component positive.
+    /// `w, x, y, z`, signed as `mju_mat2Quat` signs it.
     pub orientation: [f64; 4],
 }
 
-/// The palm's pose in `base_link`, which is the DH base (`base`) turned 180° about z.
+/// The palm's pose in `base_link`, which is the DH base (`base`) turned 180° about z, for the
+/// joints the policy is given.
 #[must_use]
 pub fn palm_pose(joints: &Joints) -> PalmPose {
-    PalmPose::new(&(tool0_pose(joints) * tool0_to_gripper_mount() * gripper_mount_to_palm()))
+    PalmPose::new(&(tool0_pose(joints) * tool0_to_palm()))
 }
 
 impl PalmPose {
     fn new(palm: &Isometry3<f64>) -> Self {
         let position = palm.translation.vector;
         let rotation = palm.rotation;
-        let mut orientation = [rotation.w, rotation.i, rotation.j, rotation.k];
-        // On a tie the first component, in `w, x, y, z` order, decides the sign; `max_by` returns the
-        // last of equals, hence the reversal.
-        let largest = orientation
-            .iter()
-            .rev()
-            .max_by(|a, b| a.abs().total_cmp(&b.abs()));
-        if largest.is_some_and(|&c| c < 0.0) {
-            orientation = orientation.map(|c| -c);
-        }
+        let orientation = [rotation.w, rotation.i, rotation.j, rotation.k];
+        // `w` while the rotation matrix's trace, 4w² − 1, is positive, else the component of its
+        // largest diagonal entry, the first of equals losing.
+        let [w, x, y, z] = orientation.map(|c| c * c);
+        let positive = if w > 0.25 {
+            rotation.w
+        } else if x > y && x > z {
+            rotation.i
+        } else if y > z {
+            rotation.j
+        } else {
+            rotation.k
+        };
         Self {
             position: [position.x, position.y, position.z],
-            orientation,
+            orientation: orientation.map(|c| if positive < 0.0 { -c } else { c }),
         }
     }
 }
@@ -107,27 +107,17 @@ fn dh_transform(link: &DhLink, theta: f64) -> Isometry3<f64> {
     Isometry3::from_parts(translation, rotation)
 }
 
-fn tool0_to_gripper_mount() -> Isometry3<f64> {
-    Isometry3::new(
-        Vector3::z() * BRACKET_THICKNESS,
-        Vector3::z() * BRACKET_TWIST,
-    )
-}
-
-fn gripper_mount_to_palm() -> Isometry3<f64> {
-    let palm_axes_in_gripper_mount = [-Vector3::x(), Vector3::z(), Vector3::y()];
-    Isometry3::from_parts(
-        PALM_OFFSET_IN_GRIPPER_MOUNT.into(),
-        UnitQuaternion::from_basis_unchecked(&palm_axes_in_gripper_mount),
-    )
+/// The palm's z is the approach and its y the fingers' opening axis, tool0's x.
+fn tool0_to_palm() -> Isometry3<f64> {
+    Isometry3::new(Vector3::z() * PALM_DISTANCE, Vector3::z() * -FRAC_PI_2)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ARM_JOINTS;
+    use crate::{ARM_JOINTS, WRIST_3_OFFSET};
     use approx::assert_abs_diff_eq;
-    use nalgebra::{Rotation3, Unit, Vector4};
+    use nalgebra::{Unit, Vector4};
     use roxmltree::{Document, Node};
     use std::{process::Command, sync::LazyLock};
     use test_case::test_case;
@@ -217,54 +207,49 @@ mod tests {
         assert_abs_diff_eq!(dh.to_homogeneous(), urdf.to_homogeneous(), epsilon = 1e-6);
     }
 
-    #[test_case(&ARM_URDF)]
-    #[test_case(&GRIPPER_URDF)]
-    fn bracket_matches_urdf(urdf: &Document<'_>) {
-        let urdf = urdf_pose(urdf, "tool0", "gripper_mount", &[0.0; 6]).unwrap();
-
-        assert_abs_diff_eq!(
-            tool0_to_gripper_mount().to_homogeneous(),
-            urdf.to_homogeneous(),
-            epsilon = 1e-6
-        );
-    }
-
-    /// The palm's x is the fingers' closing axis and its y the approach.
+    /// On this arm the palm is on the gripper's axis with the gripper's axes, 107 mm out from its
+    /// base: this URDF has no 7 mm spacer, but the policy was trained with one.
     #[test]
-    fn palm_axes_match_gripper() {
+    fn palm_matches_gripper() {
         let gripper = gripper_pose("robotiq_140_base_link");
+        let wrist_3_offset = Isometry3::rotation(Vector3::z() * WRIST_3_OFFSET);
 
-        let palm_in_gripper =
-            gripper.inverse() * tool0_to_gripper_mount() * gripper_mount_to_palm();
+        let palm_in_gripper = gripper.inverse() * wrist_3_offset * tool0_to_palm();
 
-        let palm_axes_in_gripper = [Vector3::y(), Vector3::z(), Vector3::x()];
         assert_abs_diff_eq!(
-            palm_in_gripper.rotation.to_rotation_matrix(),
-            Rotation3::from_basis_unchecked(&palm_axes_in_gripper),
+            palm_in_gripper.to_homogeneous(),
+            Isometry3::translation(0.0, 0.0, 0.107).to_homogeneous(),
             epsilon = 1e-6
         );
     }
 
-    /// The example is the training simulation's, whose gripper is bolted straight onto the flange.
+    /// The example in Reality Check's `docs/api.md`, at its `HOME_Q`.
     #[test]
-    #[expect(
-        clippy::approx_constant,
-        reason = "the contract's example pose, as written"
-    )]
+    #[expect(clippy::approx_constant, reason = "Reality Check's HOME_Q, as written")]
     fn contract_example() {
-        let joints = [-0.2055, -0.60, 1.15, -3.60, 1.5708, 0.0];
+        let joints = [-0.2055, -1.1091, 1.6007, -1.9708, -1.5708, 1.5708];
 
-        let pose = PalmPose::new(&(tool0_pose(&joints) * gripper_mount_to_palm()));
+        let pose = palm_pose(&joints);
 
         assert_abs_diff_eq!(
             Vector3::from(pose.position),
-            Vector3::new(0.8951, -0.0087, 0.2514),
-            epsilon = 0.001
+            Vector3::new(0.8906, -0.0078, 0.2016),
+            epsilon = 1e-4
         );
         assert_abs_diff_eq!(
             Vector4::from(pose.orientation),
             Vector4::new(-0.0289, -0.6302, 0.7751, 0.0355),
-            epsilon = 0.001
+            epsilon = 1e-4
         );
+    }
+
+    #[test_case(Vector3::x(), -100.0 => [0.6428, -0.766, 0.0, 0.0]; "w positive while the trace is")]
+    #[test_case(Vector3::z(), -170.0 => [-0.0872, 0.0, 0.0, 0.9962]; "else the largest diagonal's")]
+    #[test_case(Vector3::y(), 180.0 => [0.0, 0.0, 1.0, 0.0]; "half a turn")]
+    fn quaternion_sign(axis: Vector3<f64>, degrees: f64) -> [f64; 4] {
+        let rotation = Isometry3::rotation(axis * degrees.to_radians());
+        PalmPose::new(&rotation)
+            .orientation
+            .map(|c| (c * 10_000.0).round() / 10_000.0)
     }
 }

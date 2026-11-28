@@ -1,8 +1,8 @@
 # Policy API
 
-The policy is an HTTP server. We call `POST /act` once per observation. One observation is the arm and camera at a single moment. The reply says how to move for the next 50 ms, or for the next few 50 ms steps. We apply that, then call again with a new observation. The policy does not pick the rate and does not talk to the arm.
+The policy is an HTTP server. We call `POST /act` once per observation. One observation is the arm and its three cameras at a single moment. The reply says how to move for the next 50 ms, or for the next few 50 ms steps. We apply that, then call again with a new observation. The policy does not pick the rate and does not talk to the arm.
 
-An episode is 300 of those 50 ms steps (15 s) on the current tasks. `episode_id` is a new string each episode and stays the same until it ends. `step` starts at 0 and counts 50 ms steps. The same `episode_id` and `step` may be sent twice. Return a valid action both times.
+An episode is 1200 of those 50 ms steps (60 s), as in Reality Check. It starts at Reality Check's `HOME_Q`, below, with the gripper open. `episode_id` is a new string each episode and stays the same until it ends. `step` starts at 0 and counts 50 ms steps. The same `episode_id` and `step` may be sent twice. Return a valid action both times.
 
 `GET /healthz` returns `200` and `{}` before weights load. `GET /readyz` returns `200` and `{ready, contract: "v0", schema_version: 2}` after load. Calls start once `ready` is true.
 
@@ -15,13 +15,19 @@ An episode is 300 of those 50 ms steps (15 s) on the current tasks. `episode_id`
   "episode_id": "demo",
   "step": 0,
   "task_id": "bench_lift_can_v0",
+  "instruction": "Pick up the can and lift it.",
+  "goal": "<base64 of one 640x480 JPEG>",
   "schema_version": 2,
-  "images": { "top": "<base64 of one 640x480 JPEG>" },
+  "images": {
+    "wrist": "<base64 of one 640x360 JPEG>",
+    "left": "<base64 of one 640x360 JPEG>",
+    "right": "<base64 of one 640x360 JPEG>"
+  },
   "proprio": {
-    "joint_pos": [-0.2055, -0.60, 1.15, -3.60, 1.5708, 0.0],
+    "joint_pos": [-0.2055, -1.1091, 1.6007, -1.9708, -1.5708, 1.5708],
     "joint_vel": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "gripper": 1.0,
-    "ee_pos": [0.8951, -0.0087, 0.2514],
+    "ee_pos": [0.8906, -0.0078, 0.2016],
     "ee_quat": [-0.0289, -0.6302, 0.7751, 0.0355]
   }
 }
@@ -32,15 +38,19 @@ An episode is 300 of those 50 ms steps (15 s) on the current tasks. `episode_id`
 | `episode_id` | string | same for every call in one episode |
 | `step` | int | the 50 ms step this observation is for, starting at 0 |
 | `task_id` | string | which task. `"hidden"` on tasks whose name is not public |
+| `instruction` | string | what to do, in words. Same for every call in one episode |
+| `goal` | string | one 640×480 JPEG, standard base64, of the finished scene. Same for every call in one episode |
 | `schema_version` | int | `2` |
-| `images.top` | string | one 640×480 JPEG, standard base64, for this step. This is the only camera |
-| `proprio.joint_pos` | 6 floats | joint angles now, radians. Order: shoulder pan, shoulder lift, elbow, wrist 1, wrist 2, wrist 3 |
+| `images.wrist` | string | one 640×360 JPEG, standard base64, from the camera on the wrist, for this step |
+| `images.left`, `images.right` | string | the same, from the cameras left and right of the table |
+| `proprio.joint_pos` | 6 floats | joint angles now, radians. Order: shoulder pan, shoulder lift, elbow, wrist 1, wrist 2, wrist 3. Wrist 3 is as in Reality Check's simulation, 7π/8 more than the arm reads, as the tool here is mounted turned that much about the flange |
 | `proprio.joint_vel` | 6 floats | joint velocity now, rad/s, same order |
 | `proprio.gripper` | float | measured opening now. `0.0` closed, `1.0` open |
-| `proprio.ee_pos` | 3 floats | palm position now, metres, in the robot base frame |
-| `proprio.ee_quat` | 4 floats | palm orientation now, quaternion **wxyz** |
+| `proprio.ee_pos` | 3 floats | palm position now, metres, in `base_link`. The palm is Reality Check's `gripperframe`, 131.4 mm out along tool0 with z the approach and y the fingers' opening axis |
+| `proprio.ee_quat` | 4 floats | palm orientation now, quaternion **wxyz**, signed as MuJoCo's `mju_mat2Quat` signs it |
 
-`images` and `proprio` are the state at `step`. They are replaced on the next call.
+`images` and `proprio` are the state at `step`. They are replaced on the next call. Each image is
+its camera's latest frame, received at most 100 ms before the call; the three are not synchronised.
 
 ## Response
 
@@ -67,8 +77,8 @@ This is what the trained policy returns.
 | field | type | meaning |
 |---|---|---|
 | `type` | string | `"joint_delta"` |
-| `values` | 6 floats | radians to **add** to the joint command over this 50 ms. Each must be in `[-0.05, 0.05]`. Same joint order as `joint_pos` |
-| `gripper` | float | commanded opening for this step, in `[0.0, 1.0]`. `0.0` closed, `1.0` open. This is the opening, not a change |
+| `values` | 6 floats | radians to **add** to the joint command over this 50 ms. Each is clamped to `[-0.05, 0.05]`. Same joint order as `joint_pos` |
+| `gripper` | float | commanded opening for this step, clamped to `[0.0, 1.0]`. `0.0` closed, `1.0` open. This is the opening, not a change |
 
 ### `"action_chunk"` — several steps from one call
 
@@ -96,3 +106,5 @@ Optional. The trained policy does not send this. `actions[0]` is this `step`, `a
 | `chunk_len` | int, optional | if present, must equal `len(actions)` |
 
 Numbers must be finite JSON numbers. Unknown fields are rejected, except names that start with `_`.
+A reply that breaks these rules is a held step: the arm holds its target and the gripper its
+opening for the step, and the episode goes on. A reply with an HTTP error status ends the episode.

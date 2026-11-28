@@ -34,6 +34,24 @@ Visualization Manager:
           Value: true
       Show Names: true
       Value: false
+    - Class: rviz_default_plugins/Image
+      Name: Wrist camera
+      Topic:
+        Value: /wrist_camera/color/image_raw/compressed
+        Reliability Policy: Best Effort
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: Left camera
+      Topic:
+        Value: /left_camera/color/image_raw/compressed
+        Reliability Policy: Best Effort
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Name: Right camera
+      Topic:
+        Value: /right_camera/color/image_raw/compressed
+        Reliability Policy: Best Effort
+      Value: true
   Global Options:
     Background Color: 48; 48; 48
     Fixed Frame: base_link

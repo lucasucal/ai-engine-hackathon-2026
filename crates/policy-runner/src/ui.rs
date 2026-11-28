@@ -3,7 +3,7 @@ use crate::{
     episode::{BUDGET, MAX_TRACKING_ERROR, Progress, STEPS},
     gripper::GripperHardware,
     policy::{ACT_TIMEOUT, Health, Readiness},
-    ros::{CAMERA_TOPIC, CameraSource},
+    ros::{CAMERA_TOPICS, CameraSource},
 };
 use policy_contract::STEP;
 use ratatui::{
@@ -18,7 +18,7 @@ use std::time::Duration;
 pub fn draw(frame: &mut Frame<'_>, app: &App<'_>, robot: Robot) {
     let [header, middle, log, footer] = Layout::vertical([
         Constraint::Length(4),
-        Constraint::Length(9),
+        Constraint::Length(11),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
@@ -48,11 +48,15 @@ fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App<'_>, phase: Phase) {
     if phase == Phase::Running {
         policy.push(Span::raw("    polling paused during the episode"));
     }
-    let camera = match app.camera {
-        CameraSource::RosTopic => CAMERA_TOPIC,
-        CameraSource::BlackImage => "none, a black frame is sent",
+    let cameras = match app.camera {
+        CameraSource::RosTopic => CAMERA_TOPICS,
+        CameraSource::BlackImage => "none, black frames are sent",
     };
-    let connection = Line::from(format!("Task    {}    Camera  {camera}", app.task_id));
+    let connection = Line::from(format!(
+        "Task    {} in {}    Cameras  {cameras}",
+        app.task_id,
+        app.tasks.display()
+    ));
     frame.render_widget(
         Paragraph::new(vec![Line::from(policy), connection])
             .block(Block::bordered().title(" Policy runner ")),
@@ -108,10 +112,15 @@ fn draw_robot(frame: &mut Frame<'_>, area: Rect, robot: Robot) {
             Span::raw(text),
         ])
     };
-    let camera = robot.camera_live.map_or_else(
-        || Line::from(format!("{:<12}– black frame", "Camera")),
-        |camera_live| live("Camera", camera_live),
-    );
+    let cameras = ["Wrist cam", "Left cam", "Right cam"]
+        .into_iter()
+        .enumerate()
+        .map(|(view, name)| {
+            robot.cameras_live.map_or_else(
+                || Line::from(format!("{name:<12}– black frame")),
+                |cameras_live| live(name, cameras_live[view]),
+            )
+        });
     let start_pose = if robot.at_start {
         Span::styled("✓ reached", Color::Green)
     } else {
@@ -126,10 +135,12 @@ fn draw_robot(frame: &mut Frame<'_>, area: Rect, robot: Robot) {
             force,
         }) => (format!("{speed_multiplier:.2}×"), format!("{force:.1} N")),
     };
-    let lines = vec![
+    let mut lines = vec![
         live("Arm", robot.arm_live),
         live("Gripper", robot.gripper_live),
-        camera,
+    ];
+    lines.extend(cameras);
+    lines.extend([
         Line::from(vec![Span::raw(format!("{:<12}", "Start pose")), start_pose]),
         setting(
             "Arm speed",
@@ -139,7 +150,7 @@ fn draw_robot(frame: &mut Frame<'_>, area: Rect, robot: Robot) {
         ),
         setting("Grip speed", grip_speed),
         setting("Grip force", grip_force),
-    ];
+    ]);
     frame.render_widget(
         Paragraph::new(lines).block(Block::bordered().title(" Robot ")),
         area,
@@ -190,8 +201,8 @@ fn draw_progress(frame: &mut Frame<'_>, rows: &[Rect], progress: &Progress) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "{:<10}{}    Retries {}",
-            "Late", progress.counts.late, progress.counts.retries
+            "{:<10}{}    Retries {}    Held {}",
+            "Late", progress.counts.late, progress.counts.retries, progress.counts.held
         )),
         *counts,
     );
@@ -336,7 +347,7 @@ mod tests {
     const LIVE: Robot = Robot {
         arm_live: true,
         gripper_live: true,
-        camera_live: None,
+        cameras_live: None,
         at_start: false,
         speed_scaling: Some(100.0),
         gripper_hardware: None,
@@ -349,6 +360,7 @@ mod tests {
             commands,
             "http://127.0.0.1:8000".to_owned(),
             camera,
+            "tasks".into(),
             "bench_lift_can_v0".to_owned(),
         );
         let mut terminal = Terminal::new(TestBackend::new(120, 24)).unwrap();
@@ -373,9 +385,9 @@ mod tests {
     fn connection() {
         let screen = screen(&shared(), CameraSource::BlackImage, LIVE);
         assert!(shows(&screen, "http://127.0.0.1:8000"), "{screen:#?}");
-        assert!(shows(&screen, "bench_lift_can_v0"), "{screen:#?}");
-        assert!(shows(&screen, "none, a black frame is sent"), "{screen:#?}");
-        assert!(shows(&screen, "– black frame"), "{screen:#?}");
+        assert!(shows(&screen, "bench_lift_can_v0 in tasks"), "{screen:#?}");
+        assert!(shows(&screen, "none, black frames are sent"), "{screen:#?}");
+        assert!(shows(&screen, "Wrist cam   – black frame"), "{screen:#?}");
     }
 
     #[test_case(Health::Up, Readiness::Ready => "health up    ready yes"; "ready")]
@@ -417,13 +429,16 @@ mod tests {
     fn stale_arm() {
         let robot = Robot {
             arm_live: false,
-            camera_live: Some(true),
+            cameras_live: Some([true, false, true]),
             ..LIVE
         };
         let screen = screen(&shared(), CameraSource::RosTopic, robot);
         assert!(shows(&screen, "Arm         ● stale"), "{screen:#?}");
         assert!(shows(&screen, "Gripper     ● live"), "{screen:#?}");
-        assert!(shows(&screen, "Camera      ● live"), "{screen:#?}");
+        assert!(shows(&screen, "Wrist cam   ● live"), "{screen:#?}");
+        assert!(shows(&screen, "Left cam    ● stale"), "{screen:#?}");
+        assert!(shows(&screen, "Right cam   ● live"), "{screen:#?}");
+        assert!(shows(&screen, CAMERA_TOPICS), "{screen:#?}");
     }
 
     #[test_case(None, None => ["Arm speed   –", "Grip speed  –", "Grip force  –"]; "nothing received")]
@@ -463,6 +478,7 @@ mod tests {
                 steps: 120,
                 late: 3,
                 retries: 1,
+                held: 2,
             },
             latencies: vec![Duration::from_millis(23), Duration::from_millis(80)],
             tracking_error: 0.04,
@@ -470,7 +486,10 @@ mod tests {
         let screen = screen(&shared, CameraSource::BlackImage, LIVE);
         assert!(shows(&screen, "running an episode"), "{screen:#?}");
         assert!(shows(&screen, &format!("120 / {STEPS}")), "{screen:#?}");
-        assert!(shows(&screen, "Late      3    Retries 1"), "{screen:#?}");
+        assert!(
+            shows(&screen, "Late      3    Retries 1    Held 2"),
+            "{screen:#?}"
+        );
         assert!(shows(&screen, "last 80 ms"), "{screen:#?}");
 
         let footer = screen.last().map_or("", String::as_str).trim_end();

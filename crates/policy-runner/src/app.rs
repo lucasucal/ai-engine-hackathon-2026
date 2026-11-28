@@ -4,14 +4,18 @@ use crate::{
     log::Log,
     policy::{PolicyStatus, Readiness},
     ros::{CameraSource, Received, Ros},
+    task::Task,
     worker::distance_to_start,
 };
 use parking_lot::Mutex;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc::Sender,
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::Sender,
+    },
 };
 
 /// How close every joint must be to count as at the start pose.
@@ -35,7 +39,7 @@ impl Phase {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     MoveToStart,
-    RunEpisode { task_id: String },
+    RunEpisode(Task),
 }
 
 /// What the arm worker and the policy monitor publish, and the display reads.
@@ -71,8 +75,8 @@ impl Shared {
 pub struct Robot {
     pub arm_live: bool,
     pub gripper_live: bool,
-    /// None without a camera topic.
-    pub camera_live: Option<bool>,
+    /// Per view, in the order of `VIEWS`; None without cameras.
+    pub cameras_live: Option<[bool; 3]>,
     pub at_start: bool,
     /// The pendant's speed slider, in percent; None while stale.
     pub speed_scaling: Option<f64>,
@@ -86,7 +90,7 @@ impl Robot {
         Self {
             arm_live: arm.is_some(),
             gripper_live: ros.finger().as_ref().is_some_and(Received::is_fresh),
-            camera_live: ros.camera_live(),
+            cameras_live: ros.cameras_live(),
             at_start: arm
                 .is_some_and(|arm| distance_to_start(&arm.value.position) <= AT_START_TOLERANCE),
             speed_scaling: ros
@@ -154,6 +158,7 @@ pub struct App<'a> {
     commands: Sender<Command>,
     pub policy_url: String,
     pub camera: CameraSource,
+    pub tasks: PathBuf,
     pub task_id: String,
     /// The new task being typed.
     pub editing: Option<String>,
@@ -166,6 +171,7 @@ impl<'a> App<'a> {
         commands: Sender<Command>,
         policy_url: String,
         camera: CameraSource,
+        tasks: PathBuf,
         task_id: String,
     ) -> Self {
         Self {
@@ -173,6 +179,7 @@ impl<'a> App<'a> {
             commands,
             policy_url,
             camera,
+            tasks,
             task_id,
             editing: None,
             quit: false,
@@ -183,10 +190,10 @@ impl<'a> App<'a> {
         let phase = *self.shared.phase.lock();
         match action(phase, self.editing.is_some(), key) {
             Action::MoveToStart => self.send(Command::MoveToStart, Phase::MovingToStart, robot),
-            Action::StartEpisode => {
-                let task_id = self.task_id.clone();
-                self.send(Command::RunEpisode { task_id }, Phase::Running, robot);
-            }
+            Action::StartEpisode => match Task::load(&self.tasks, &self.task_id) {
+                Ok(task) => self.send(Command::RunEpisode(task), Phase::Running, robot),
+                Err(error) => self.shared.log.push(format!("Enter refused: {error:#}.")),
+            },
             Action::Abort => self.shared.cancel.store(true, Ordering::Relaxed),
             Action::Quit => self.quit = true,
             Action::EditTask => self.editing = Some(String::new()),
@@ -215,7 +222,7 @@ impl<'a> App<'a> {
     /// Moving to the start pose commands only the arm, so it needs neither the policy nor the
     /// gripper.
     fn refusal(&self, command: &Command, robot: Robot) -> Option<String> {
-        let episode = matches!(command, Command::RunEpisode { .. });
+        let episode = matches!(command, Command::RunEpisode(_));
         let mut reasons = Vec::new();
         if episode {
             match self.shared.policy.lock().as_ref() {
@@ -250,7 +257,7 @@ impl<'a> App<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::Health;
+    use crate::{policy::Health, task::tests::Tasks};
     use std::{
         assert_matches,
         sync::mpsc::{self, Receiver},
@@ -320,7 +327,7 @@ mod tests {
     const LIVE: Robot = Robot {
         arm_live: true,
         gripper_live: true,
-        camera_live: None,
+        cameras_live: None,
         at_start: false,
         speed_scaling: Some(100.0),
         gripper_hardware: None,
@@ -335,13 +342,14 @@ mod tests {
         shared
     }
 
-    fn app(shared: &Shared) -> (App<'_>, Receiver<Command>) {
+    fn app<'a>(shared: &'a Shared, tasks: &Tasks) -> (App<'a>, Receiver<Command>) {
         let (commands, received) = mpsc::channel();
         let app = App::new(
             shared,
             commands,
             "url".to_owned(),
             CameraSource::BlackImage,
+            tasks.0.clone(),
             "task".to_owned(),
         );
         (app, received)
@@ -377,7 +385,8 @@ mod tests {
     fn enter_refused(phase: Phase, readiness: Option<Readiness>, robot: Robot) -> String {
         let shared = shared_with(readiness);
         *shared.phase.lock() = phase;
-        let (mut app, received) = app(&shared);
+        let tasks = Tasks::new(&["task"]);
+        let (mut app, received) = app(&shared, &tasks);
         app.handle(press(KeyCode::Enter), robot);
         assert_matches!(received.try_recv(), Err(_));
         assert_eq!(*shared.phase.lock(), phase);
@@ -389,7 +398,7 @@ mod tests {
     #[test_case(Some(Readiness::Ready), Robot { gripper_live: false, ..LIVE }; "stale gripper")]
     fn move_needs_only_arm(readiness: Option<Readiness>, robot: Robot) {
         let shared = shared_with(readiness);
-        let (mut app, received) = app(&shared);
+        let (mut app, received) = app(&shared, &Tasks::new(&[]));
         app.handle(press(KeyCode::Enter), robot);
         assert_eq!(*shared.phase.lock(), Phase::MovingToStart);
         assert_eq!(
@@ -401,7 +410,7 @@ mod tests {
     #[test]
     fn second_enter_sends_nothing() {
         let shared = shared_with(Some(Readiness::Ready));
-        let (mut app, received) = app(&shared);
+        let (mut app, received) = app(&shared, &Tasks::new(&[]));
         app.handle(press(KeyCode::Enter), LIVE);
         app.handle(press(KeyCode::Enter), LIVE);
         assert_eq!(*shared.phase.lock(), Phase::MovingToStart);
@@ -415,7 +424,8 @@ mod tests {
     fn episode_takes_the_task() {
         let shared = shared_with(Some(Readiness::Ready));
         *shared.phase.lock() = Phase::AtStart;
-        let (mut app, received) = app(&shared);
+        let tasks = Tasks::new(&["b"]);
+        let (mut app, received) = app(&shared, &tasks);
         for key in [KeyCode::Char('t'), KeyCode::Char('b'), KeyCode::Char('x')] {
             app.handle(press(key), LIVE);
         }
@@ -425,16 +435,30 @@ mod tests {
         app.handle(press(KeyCode::Enter), LIVE);
         assert_eq!(
             received.try_iter().collect::<Vec<_>>(),
-            [Command::RunEpisode {
-                task_id: "b".to_owned()
-            }]
+            [Command::RunEpisode(Task::load(&tasks.0, "b").unwrap())]
+        );
+    }
+
+    #[test]
+    fn episode_needs_the_task_files() {
+        let shared = shared_with(Some(Readiness::Ready));
+        *shared.phase.lock() = Phase::AtStart;
+        let tasks = Tasks::new(&[]);
+        let (mut app, received) = app(&shared, &tasks);
+        app.handle(press(KeyCode::Enter), LIVE);
+        assert_matches!(received.try_recv(), Err(_));
+        assert_eq!(*shared.phase.lock(), Phase::AtStart);
+        assert!(
+            last_log(&shared).starts_with("Enter refused: cannot read "),
+            "{}",
+            last_log(&shared)
         );
     }
 
     #[test]
     fn empty_task_refused() {
         let shared = shared_with(None);
-        let (mut app, _received) = app(&shared);
+        let (mut app, _received) = app(&shared, &Tasks::new(&[]));
         app.handle(press(KeyCode::Char('t')), LIVE);
         app.handle(press(KeyCode::Char(' ')), LIVE);
         app.handle(press(KeyCode::Enter), LIVE);
@@ -446,7 +470,7 @@ mod tests {
     #[test]
     fn discarded_task() {
         let shared = shared_with(None);
-        let (mut app, _received) = app(&shared);
+        let (mut app, _received) = app(&shared, &Tasks::new(&[]));
         app.handle(press(KeyCode::Char('t')), LIVE);
         app.handle(press(KeyCode::Char('x')), LIVE);
         app.handle(press(KeyCode::Esc), LIVE);
@@ -458,7 +482,7 @@ mod tests {
     fn abort_sets_cancel() {
         let shared = shared_with(Some(Readiness::Ready));
         *shared.phase.lock() = Phase::Running;
-        let (mut app, _received) = app(&shared);
+        let (mut app, _received) = app(&shared, &Tasks::new(&[]));
         app.handle(press(KeyCode::Esc), LIVE);
         assert_matches!(shared.cancel.load(Ordering::Relaxed), true);
     }

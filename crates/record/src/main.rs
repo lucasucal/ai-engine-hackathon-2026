@@ -237,11 +237,8 @@ impl Recorder {
             Ok(path) => {
                 let steps = episode.steps.len();
                 let mut details = vec![format!("{:.2} s", duration(steps).as_secs_f64())];
-                if episode.steps_without_image > 0 {
-                    details.push(format!(
-                        "{} without a camera frame",
-                        episode.steps_without_image
-                    ));
+                if episode.black_frames > 0 {
+                    details.push(format!("{} black frames", episode.black_frames));
                 }
                 if *end != End::Release {
                     details.push(format!("ended by {ended_by}"));

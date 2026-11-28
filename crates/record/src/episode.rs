@@ -1,9 +1,9 @@
-use crate::ros::{CAMERA_TOPIC, Ros};
+use crate::ros::{Received, Ros, camera_topic};
 use jiff::ZonedDateTime;
 use policy_contract::{
     Joints, gripper,
-    image::{FrameError, check_jpeg},
-    kinematics,
+    image::{FRAME_SIZE, FrameError, VIEWS, check_jpeg},
+    kinematics, policy_joints,
 };
 use serde::Serialize;
 use std::{fmt, time::Instant};
@@ -29,7 +29,8 @@ pub enum Image {
 #[derive(Debug, Clone)]
 pub struct Observation {
     pub proprio: RecordedProprio,
-    pub image: Image,
+    /// In the order of `VIEWS`.
+    pub images: [Image; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -38,10 +39,13 @@ pub enum Stale {
     Arm,
     #[error("no fresh /gripper/joint_states")]
     Gripper,
-    #[error("no fresh frame on {CAMERA_TOPIC}")]
-    Camera,
-    #[error(transparent)]
-    Frame(#[from] FrameError),
+    #[error("no fresh frame on {}", camera_topic(.0))]
+    Camera(&'static str),
+    #[error("the frame on {}: {error}", camera_topic(.view))]
+    Frame {
+        view: &'static str,
+        error: FrameError,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +73,7 @@ impl fmt::Display for End {
 pub struct Step {
     /// Seconds since the episode started.
     pub t: f64,
-    pub image: Image,
+    pub images: [Image; 3],
     pub proprio: RecordedProprio,
     /// The gripper opening last commanded.
     pub gripper_command: f64,
@@ -82,7 +86,7 @@ pub struct Episode {
     pub started_at: String,
     pub start: Instant,
     pub steps: Vec<Step>,
-    pub steps_without_image: u32,
+    pub black_frames: usize,
 }
 
 impl Episode {
@@ -94,18 +98,20 @@ impl Episode {
             started_at: now.strftime("%Y-%m-%dT%H:%M:%S%.6f%:z").to_string(),
             start,
             steps: Vec::new(),
-            steps_without_image: 0,
+            black_frames: 0,
         }
     }
 
     pub fn add_step(&mut self, now: Instant, observation: Observation, commanded_finger: f64) {
-        if matches!(observation.image, Image::Black) {
-            self.steps_without_image += 1;
-        }
+        self.black_frames += observation
+            .images
+            .iter()
+            .filter(|image| matches!(image, Image::Black))
+            .count();
         let t = (now - self.start).as_secs_f64();
         self.steps.push(Step {
             t: (t * 10_000.0).round() / 10_000.0,
-            image: observation.image,
+            images: observation.images,
             proprio: observation.proprio,
             gripper_command: gripper::opening(commanded_finger),
         });
@@ -127,30 +133,37 @@ pub fn observe(ros: &Ros, now: Instant, permissive: bool) -> Result<Observation,
     if gripper.is_none() && !permissive {
         return Err(Stale::Gripper);
     }
-    let image = match camera_frame(ros, now) {
-        Ok(jpeg) => Image::Camera(jpeg),
-        Err(_) if permissive => Image::Black,
-        Err(stale) => return Err(stale),
-    };
-    let palm = kinematics::palm_pose(&arm.position);
+    let mut images = [const { Image::Black }; 3];
+    for ((image, view), frame) in images.iter_mut().zip(VIEWS).zip(ros.cameras()) {
+        match camera_frame(view, frame, now) {
+            Ok(jpeg) => *image = Image::Camera(jpeg),
+            Err(_) if permissive => {}
+            Err(stale) => return Err(stale),
+        }
+    }
+    let joint_pos = policy_joints(arm.position);
+    let palm = kinematics::palm_pose(&joint_pos);
     Ok(Observation {
         proprio: RecordedProprio {
-            joint_pos: arm.position,
+            joint_pos,
             joint_vel: arm.velocity,
             gripper,
             ee_pos: palm.position,
             ee_quat: palm.orientation,
         },
-        image,
+        images,
     })
 }
 
-fn camera_frame(ros: &Ros, now: Instant) -> Result<Vec<u8>, Stale> {
-    let frame = ros
-        .camera()
+fn camera_frame(
+    view: &'static str,
+    frame: Option<Received<Vec<u8>>>,
+    now: Instant,
+) -> Result<Vec<u8>, Stale> {
+    let frame = frame
         .filter(|frame| frame.is_fresh(now))
-        .ok_or(Stale::Camera)?;
-    check_jpeg(&frame.value)?;
+        .ok_or(Stale::Camera(view))?;
+    check_jpeg(&frame.value, FRAME_SIZE).map_err(|error| Stale::Frame { view, error })?;
     Ok(frame.value)
 }
 

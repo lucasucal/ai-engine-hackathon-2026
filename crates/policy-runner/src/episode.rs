@@ -1,6 +1,7 @@
 use crate::{
     policy::{ActError, Policy},
     ros::{Received, Ros},
+    task::Task,
 };
 use color_eyre::{
     Result,
@@ -8,8 +9,8 @@ use color_eyre::{
 };
 use parking_lot::Mutex;
 use policy_contract::{
-    Joints, SCHEMA_VERSION, STEP, gripper, kinematics,
-    wire::{ActRequest, Action, Images, Proprio},
+    Joints, SCHEMA_VERSION, STEP, gripper, kinematics, policy_joints,
+    wire::{ActRequest, Action, InvalidReply, Proprio},
 };
 use std::{
     fmt,
@@ -18,13 +19,13 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub const STEPS: u32 = 600;
-pub const BUDGET: Duration = Duration::from_secs(45);
+pub const STEPS: u32 = 1200;
+pub const BUDGET: Duration = Duration::from_secs(90);
 pub const MAX_TRACKING_ERROR: f64 = 0.25;
 /// How often a sleep checks for Ctrl-C and the budget.
 const SLEEP_SLICE: Duration = Duration::from_millis(5);
-/// Connection errors return at once; this keeps a policy that is down from being called in a
-/// tight loop.
+/// Connection and camera errors return at once; this keeps them from being retried in a tight
+/// loop.
 const MIN_RETRY_INTERVAL: Duration = Duration::from_millis(20);
 
 pub enum Outcome {
@@ -39,6 +40,7 @@ pub struct Report {
     /// Why the arm may not be holding, however the episode ended.
     pub hold_failed: Option<eyre::Report>,
     pub counts: Counts,
+    pub last_held: Option<String>,
     pub duration: Duration,
 }
 
@@ -47,6 +49,8 @@ pub struct Counts {
     pub steps: u32,
     pub late: u32,
     pub retries: u32,
+    /// Steps of an invalid reply, in which the arm held its target.
+    pub held: u32,
 }
 
 impl fmt::Display for Report {
@@ -62,12 +66,17 @@ impl fmt::Display for Report {
         }
         write!(
             f,
-            "; {} steps in {:.2} s, {} late replies, {} retries",
+            "; {} steps in {:.2} s, {} late replies, {} retries, {} held steps",
             self.counts.steps,
             self.duration.as_secs_f64(),
             self.counts.late,
-            self.counts.retries
-        )
+            self.counts.retries,
+            self.counts.held
+        )?;
+        if let Some(reason) = &self.last_held {
+            write!(f, "; the last held {reason}")?;
+        }
+        Ok(())
     }
 }
 
@@ -115,13 +124,18 @@ impl From<eyre::Report> for Stop {
 pub struct Episode<'a> {
     ros: &'a Ros,
     policy: &'a Policy,
-    task_id: &'a str,
+    task: &'a Task,
     cancel: &'a AtomicBool,
     progress: &'a Mutex<Option<Progress>>,
     id: String,
     started: Instant,
+    /// In the arm's joints, to which the policy's deltas apply unchanged.
     q_cmd: Joints,
+    /// The opening last commanded; the gripper starts open.
+    gripper: f64,
     counts: Counts,
+    last_retry: Option<String>,
+    last_held: Option<String>,
 }
 
 impl<'a> Episode<'a> {
@@ -130,7 +144,7 @@ impl<'a> Episode<'a> {
     pub fn run(
         ros: &'a Ros,
         policy: &'a Policy,
-        task_id: &'a str,
+        task: &'a Task,
         cancel: &'a AtomicBool,
         progress: &'a Mutex<Option<Progress>>,
     ) -> Report {
@@ -138,13 +152,16 @@ impl<'a> Episode<'a> {
         let mut episode = Self {
             ros,
             policy,
-            task_id,
+            task,
             cancel,
             progress,
             id: episode_id(),
             started: Instant::now(),
             q_cmd: [0.0; 6],
+            gripper: 1.0,
             counts: Counts::default(),
+            last_retry: None,
+            last_held: None,
         };
         let outcome = match episode.step_loop() {
             Ok(()) => Outcome::Completed,
@@ -152,10 +169,11 @@ impl<'a> Episode<'a> {
             Err(Stop::Aborted) => Outcome::Aborted,
         };
         let report = Report {
-            task_id: task_id.to_owned(),
+            task_id: task.id.clone(),
             outcome,
             hold_failed: episode.stop().err(),
             counts: episode.counts,
+            last_held: episode.last_held.take(),
             duration: episode.started.elapsed(),
         };
         episode.publish(|progress| progress.duration = Some(report.duration));
@@ -201,6 +219,7 @@ impl<'a> Episode<'a> {
                     self.q_cmd = q;
                 }
                 self.ros.command_finger(gripper::finger(action.gripper))?;
+                self.gripper = action.gripper;
                 self.counts.steps += 1;
                 self.publish(|progress| progress.counts = self.counts);
             }
@@ -210,21 +229,29 @@ impl<'a> Episode<'a> {
         self.sleep_until(next_start)
     }
 
-    /// Observes and calls the policy for the current step, again on timeouts and connection
-    /// errors, until a reply arrives or the budget runs out.
+    /// Observes and calls the policy for the current step, again on camera errors, timeouts and
+    /// connection errors, until a reply arrives or the budget runs out. An invalid reply other than
+    /// an HTTP error holds the arm for the step, as Reality Check does.
     fn act(&mut self) -> Result<Vec<Action>, Stop> {
         loop {
             self.check_cancel_and_budget()?;
             let attempt = Instant::now();
             let proprio = self.observe()?;
+            let images = match self.ros.images() {
+                Ok(images) => images,
+                Err(error) => {
+                    self.retry(attempt, format!("{error:#}"))?;
+                    continue;
+                }
+            };
             let request = ActRequest {
                 episode_id: &self.id,
                 step: self.counts.steps,
-                task_id: self.task_id,
+                task_id: &self.task.id,
+                instruction: &self.task.instruction,
+                goal: &self.task.goal,
                 schema_version: SCHEMA_VERSION,
-                images: Images {
-                    top: self.ros.image()?,
-                },
+                images,
                 proprio,
             };
             let sent = Instant::now();
@@ -233,18 +260,30 @@ impl<'a> Episode<'a> {
                     self.publish(|progress| progress.latencies.push(sent.elapsed()));
                     return Ok(actions);
                 }
-                Err(ActError::Transient(_)) => {
-                    self.counts.retries += 1;
-                    self.publish(|progress| progress.counts = self.counts);
-                    self.sleep_until(attempt + MIN_RETRY_INTERVAL)?;
-                }
-                Err(error @ ActError::Invalid(_)) => {
+                Err(ActError::Transient(error)) => self.retry(attempt, error.to_string())?,
+                Err(error @ ActError::Invalid(InvalidReply::Status(_))) => {
                     return Err(eyre::Report::new(error)
                         .wrap_err(format!("step {}", self.counts.steps))
                         .into());
                 }
+                Err(ActError::Invalid(error)) => {
+                    self.counts.held += 1;
+                    self.last_held = Some(format!("step {}: {error}", self.counts.steps));
+                    self.publish(|progress| progress.counts = self.counts);
+                    return Ok(vec![Action {
+                        delta: [0.0; 6],
+                        gripper: self.gripper,
+                    }]);
+                }
             }
         }
+    }
+
+    fn retry(&mut self, attempt: Instant, reason: String) -> Result<(), Stop> {
+        self.counts.retries += 1;
+        self.last_retry = Some(reason);
+        self.publish(|progress| progress.counts = self.counts);
+        self.sleep_until(attempt + MIN_RETRY_INTERVAL)
     }
 
     fn observe(&self) -> Result<Proprio> {
@@ -274,9 +313,10 @@ impl<'a> Episode<'a> {
             bail!("joint {joint} is {error:.3} rad from its command");
         }
 
-        let palm = kinematics::palm_pose(&position);
+        let joint_pos = policy_joints(position);
+        let palm = kinematics::palm_pose(&joint_pos);
         Ok(Proprio {
-            joint_pos: position,
+            joint_pos,
             joint_vel: arm.value.velocity,
             gripper: gripper::opening(finger.value),
             ee_pos: palm.position,
@@ -300,7 +340,10 @@ impl<'a> Episode<'a> {
             return Err(Stop::Aborted);
         }
         if self.started.elapsed() > BUDGET {
-            return Err(eyre!("not completed within {} s", BUDGET.as_secs()).into());
+            let last_retry = self.last_retry.as_ref().map_or_else(String::new, |reason| {
+                format!("; the last retry was for {reason}")
+            });
+            return Err(eyre!("not completed within {} s{last_retry}", BUDGET.as_secs()).into());
         }
         Ok(())
     }

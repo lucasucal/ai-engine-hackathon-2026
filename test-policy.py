@@ -80,14 +80,7 @@ UR12E_DH = [
     (0.11655, 0.0, 0.0),
 ]
 BASE_LINK_TO_BASE: Matrix = [[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
-BRACKET_TWIST = -math.pi / 8
-TOOL0_TO_GRIPPER_MOUNT: Matrix = [
-    [math.cos(BRACKET_TWIST), -math.sin(BRACKET_TWIST), 0, 0],
-    [math.sin(BRACKET_TWIST), math.cos(BRACKET_TWIST), 0, 0],
-    [0, 0, 1, 0.0244],
-    [0, 0, 0, 1],
-]
-GRIPPER_MOUNT_TO_PALM: Matrix = [[-1, 0, 0, 0], [0, 0, 1, 0.107], [0, 1, 0, 0], [0, 0, 0, 1]]
+TOOL0_TO_PALM: Matrix = [[0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 1, 0.1314], [0, 0, 0, 1]]
 
 GO_STEPS = 120
 HOLD_STEPS = 60
@@ -116,7 +109,7 @@ def palm_pose(q: Joints) -> Matrix:
     pose = BASE_LINK_TO_BASE
     for (d, a, alpha), theta in zip(UR12E_DH, q, strict=True):
         pose = matmul(pose, dh(d, a, alpha, theta))
-    return matmul(matmul(pose, TOOL0_TO_GRIPPER_MOUNT), GRIPPER_MOUNT_TO_PALM)
+    return matmul(pose, TOOL0_TO_PALM)
 
 
 def cross(u: list[float], v: list[float]) -> list[float]:
@@ -358,8 +351,10 @@ class Policy:
             delay = self.args.slow_delay
         time.sleep(delay / 1000)
 
-        if self.args.save_image:
-            Path(self.args.save_image).write_bytes(base64.b64decode(request["images"]["top"]))
+        if self.args.save_images:
+            images = {**request["images"], "goal": request["goal"]}
+            for name, jpeg in images.items():
+                Path(self.args.save_images, f"{name}.jpg").write_bytes(base64.b64decode(jpeg))
 
         if self.args.chunk > 1:
             actions = [self.joint_delta(request, step + i) for i in range(self.args.chunk)]
@@ -460,7 +455,10 @@ def main() -> None:
     )
     _ = parser.add_argument("--hang", action="store_true", help="never reply to /act")
     _ = parser.add_argument("--log-requests", action="store_true", help="print each /act call")
-    _ = parser.add_argument("--save-image", help="write the last received image to this file")
+    _ = parser.add_argument(
+        "--save-images",
+        help="write the last received images and goal to this folder, as <view>.jpg and goal.jpg",
+    )
     args = parser.parse_args()
     if args.replay is not None and args.offset is not None:
         parser.error("--replay and --offset are alternatives")

@@ -4,6 +4,7 @@ mod gripper;
 mod log;
 mod policy;
 mod ros;
+mod task;
 mod ui;
 mod worker;
 
@@ -19,6 +20,7 @@ use ratatui::{
 use ros::{CameraSource, Ros};
 use std::{
     io::{self, IsTerminal},
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -44,7 +46,11 @@ struct Args {
     /// The `task_id` sent to the policy; `t` changes it between episodes.
     #[arg(long)]
     task: String,
-    /// Send a black frame instead of the camera's.
+    /// Holds `<task_id>.txt`, the instruction, and `<task_id>.jpg`, the 640×480 goal photo, for
+    /// each task; read as each episode starts.
+    #[arg(long)]
+    tasks: PathBuf,
+    /// Send black frames instead of the cameras'.
     #[arg(long)]
     no_camera: bool,
 }
@@ -83,6 +89,7 @@ fn main() -> Result<()> {
             commands,
             args.policy.clone(),
             camera,
+            args.tasks.clone(),
             args.task.clone(),
         );
         let stop = StopOnDrop(&shared);
